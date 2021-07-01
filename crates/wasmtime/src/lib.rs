@@ -276,6 +276,7 @@
 #![cfg_attr(nightlydoc, feature(doc_cfg))]
 #![cfg_attr(not(feature = "default"), allow(dead_code, unused_imports))]
 #![feature(weak_into_raw)]
+#![feature(array_value_iter)]
 
 #[macro_use]
 mod func;
