@@ -3,14 +3,13 @@
 use crate::ir::condcodes::IntCC;
 use crate::ir::Function;
 use crate::isa::Builder as IsaBuilder;
-use crate::machinst::{
-    compile, MachBackend, MachCompileResult, ShowWithRRU, TargetIsaAdapter, VCode,
-};
+use crate::machinst::{compile, MachBackend, MachCompileResult, TargetIsaAdapter, VCode};
 use crate::result::CodegenResult;
 use crate::settings;
 
-use alloc::boxed::Box;
-use regalloc::RealRegUniverse;
+use alloc::{boxed::Box, vec::Vec};
+use core::hash::{Hash, Hasher};
+use regalloc::{PrettyPrint, RealRegUniverse};
 use target_lexicon::{Architecture, ArmArchitecture, Triple};
 
 // New backend:
@@ -19,7 +18,7 @@ mod inst;
 mod lower;
 mod lower_inst;
 
-use inst::create_reg_universe;
+use inst::{create_reg_universe, EmitInfo};
 
 /// An ARM32 backend.
 pub struct Arm32Backend {
@@ -46,8 +45,9 @@ impl Arm32Backend {
     ) -> CodegenResult<VCode<inst::Inst>> {
         // This performs lowering to VCode, register-allocates the code, computes
         // block layout and finalizes branches. The result is ready for binary emission.
+        let emit_info = EmitInfo::new(flags.clone());
         let abi = Box::new(abi::Arm32ABICallee::new(func, flags)?);
-        compile::compile::<Arm32Backend>(func, self, abi)
+        compile::compile::<Arm32Backend>(func, self, abi, emit_info)
     }
 }
 
@@ -61,6 +61,7 @@ impl MachBackend for Arm32Backend {
         let vcode = self.compile_vcode(func, flags.clone())?;
         let buffer = vcode.emit();
         let frame_size = vcode.frame_size();
+        let stackslot_offsets = vcode.stackslot_offsets().clone();
 
         let disasm = if want_disasm {
             Some(vcode.show_rru(Some(&create_reg_universe())))
@@ -74,6 +75,8 @@ impl MachBackend for Arm32Backend {
             buffer,
             frame_size,
             disasm,
+            value_labels_ranges: Default::default(),
+            stackslot_offsets,
         })
     }
 
@@ -87,6 +90,14 @@ impl MachBackend for Arm32Backend {
 
     fn flags(&self) -> &settings::Flags {
         &self.flags
+    }
+
+    fn isa_flags(&self) -> Vec<settings::Value> {
+        Vec::new()
+    }
+
+    fn hash_all_flags(&self, mut hasher: &mut dyn Hasher) {
+        self.flags.hash(&mut hasher);
     }
 
     fn reg_universe(&self) -> &RealRegUniverse {

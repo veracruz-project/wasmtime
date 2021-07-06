@@ -45,10 +45,13 @@ fn main() -> anyhow::Result<()> {
                 .arg(target))?;
         }
         println!("======== Rust example `{}` ============", example);
-        run(Command::new("cargo")
-            .arg("run")
-            .arg("--example")
-            .arg(&example))?;
+        let mut cargo_cmd = Command::new("cargo");
+        cargo_cmd.arg("run").arg("--example").arg(&example);
+
+        if example.contains("tokio") {
+            cargo_cmd.arg("--features").arg("wasmtime-wasi/tokio");
+        }
+        run(&mut cargo_cmd)?;
 
         println!("======== C/C++ example `{}` ============", example);
         for extension in ["c", "cc"].iter() {
@@ -83,7 +86,8 @@ fn main() -> anyhow::Result<()> {
                     .arg("userenv.lib")
                     .arg("ntdll.lib")
                     .arg("shell32.lib")
-                    .arg("ole32.lib");
+                    .arg("ole32.lib")
+                    .arg("bcrypt.lib");
                 if is_dir {
                     "main.exe".to_string()
                 } else {

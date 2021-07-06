@@ -13,13 +13,26 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::option_map_unwrap_or,
-        clippy::option_map_unwrap_or_else,
-        clippy::print_stdout,
+        clippy::map_unwrap_or,
+        clippy::clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
 )]
+
+#[cfg(feature = "parallel-compilation")]
+macro_rules! maybe_parallel {
+    ($e:ident.($serial:ident | $parallel:ident)) => {
+        $e.$parallel()
+    };
+}
+
+#[cfg(not(feature = "parallel-compilation"))]
+macro_rules! maybe_parallel {
+    ($e:ident.($serial:ident | $parallel:ident)) => {
+        $e.$serial()
+    };
+}
 
 mod code_memory;
 mod compiler;
@@ -33,8 +46,11 @@ pub mod trampoline;
 
 pub use crate::code_memory::CodeMemory;
 pub use crate::compiler::{Compilation, CompilationStrategy, Compiler};
-pub use crate::instantiate::{CompilationArtifacts, CompiledModule, SetupError};
+pub use crate::instantiate::{
+    CompilationArtifacts, CompiledModule, ModuleCode, SetupError, SymbolizeContext, TypeTables,
+};
 pub use crate::link::link_module;
+pub use wasmtime_cranelift::{blank_sig, wasmtime_call_conv};
 
 /// Version number of this crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
