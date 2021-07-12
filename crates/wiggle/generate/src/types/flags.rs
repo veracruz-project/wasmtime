@@ -1,148 +1,68 @@
-use super::{atom_token, int_repr_tokens};
 use crate::names::Names;
 
 use proc_macro2::{Literal, TokenStream};
 use quote::quote;
-use std::convert::TryFrom;
 
-pub(super) fn define_flags(names: &Names, name: &witx::Id, f: &witx::FlagsDatatype) -> TokenStream {
+pub(super) fn define_flags(
+    names: &Names,
+    name: &witx::Id,
+    repr: witx::IntRepr,
+    record: &witx::RecordDatatype,
+) -> TokenStream {
     let rt = names.runtime_mod();
     let ident = names.type_(&name);
-    let repr = int_repr_tokens(f.repr);
-    let abi_repr = atom_token(match f.repr {
-        witx::IntRepr::U8 | witx::IntRepr::U16 | witx::IntRepr::U32 => witx::AtomType::I32,
-        witx::IntRepr::U64 => witx::AtomType::I64,
-    });
+    let abi_repr = names.wasm_type(repr.into());
+    let repr = super::int_repr_tokens(repr);
 
     let mut names_ = vec![];
     let mut values_ = vec![];
-    for (i, f) in f.flags.iter().enumerate() {
-        let name = names.flag_member(&f.name);
-        let value = 1u128
-            .checked_shl(u32::try_from(i).expect("flag value overflow"))
-            .expect("flag value overflow");
-        let value_token = Literal::u128_unsuffixed(value);
+    for (i, member) in record.members.iter().enumerate() {
+        let name = names.flag_member(&member.name);
+        let value_token = Literal::usize_unsuffixed(1 << i);
         names_.push(name);
         values_.push(value_token);
     }
 
     quote! {
-        #[repr(transparent)]
-        #[derive(Copy, Clone, Debug, ::std::hash::Hash, Eq, PartialEq)]
-        pub struct #ident(#repr);
-
-        impl #ident {
-            #(pub const #names_: #ident = #ident(#values_);)*
-
-            #[inline]
-            pub const fn empty() -> Self {
-                #ident(0)
-            }
-
-            #[inline]
-            pub const fn all() -> Self {
-                #ident(#(#values_)|*)
-            }
-
-            #[inline]
-            pub fn contains(&self, other: &#ident) -> bool {
-                !*self & *other == Self::empty()
+        #rt::bitflags::bitflags! {
+            pub struct #ident: #repr {
+                #(const #names_ = #values_;)*
             }
         }
 
         impl ::std::fmt::Display for #ident {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                let mut first = true;
-                #(
-                    if self.0 & #values_ == #values_ {
-                        if !first {
-                            f.write_str("|")?;
-                        }
-                        first = false;
-                        f.write_fmt(format_args!("{}", stringify!(#names_).to_lowercase()))?;
-                    }
-                )*
-                if first {
-                    f.write_str("empty")?;
-                }
-                f.write_fmt(format_args!(" ({:#x})", self.0))?;
+                f.write_str(stringify!(#ident))?;
+                f.write_str("(")?;
+                ::std::fmt::Debug::fmt(self, f)?;
+                f.write_str(" (0x")?;
+                ::std::fmt::LowerHex::fmt(&self.bits, f)?;
+                f.write_str("))")?;
                 Ok(())
             }
         }
 
-        impl ::std::ops::BitAnd for #ident {
-            type Output = Self;
-            fn bitand(self, rhs: Self) -> Self::Output {
-                #ident(self.0 & rhs.0)
-            }
-        }
-
-        impl ::std::ops::BitAndAssign for #ident {
-            fn bitand_assign(&mut self, rhs: Self) {
-                *self = *self & rhs
-            }
-        }
-
-        impl ::std::ops::BitOr for #ident {
-            type Output = Self;
-            fn bitor(self, rhs: Self) -> Self::Output {
-                #ident(self.0 | rhs.0)
-            }
-        }
-
-        impl ::std::ops::BitOrAssign for #ident {
-            fn bitor_assign(&mut self, rhs: Self) {
-                *self = *self | rhs
-            }
-        }
-
-        impl ::std::ops::BitXor for #ident {
-            type Output = Self;
-            fn bitxor(self, rhs: Self) -> Self::Output {
-                #ident(self.0 ^ rhs.0)
-            }
-        }
-
-        impl ::std::ops::BitXorAssign for #ident {
-            fn bitxor_assign(&mut self, rhs: Self) {
-                *self = *self ^ rhs
-            }
-        }
-
-        impl ::std::ops::Not for #ident {
-            type Output = Self;
-            fn not(self) -> Self::Output {
-                #ident(!self.0)
-            }
-        }
-
-        impl ::std::convert::TryFrom<#repr> for #ident {
+        impl TryFrom<#repr> for #ident {
             type Error = #rt::GuestError;
             fn try_from(value: #repr) -> Result<Self, #rt::GuestError> {
                 if #repr::from(!#ident::all()) & value != 0 {
                     Err(#rt::GuestError::InvalidFlagValue(stringify!(#ident)))
                 } else {
-                    Ok(#ident(value))
+                    Ok(#ident { bits: value })
                 }
             }
         }
 
-        impl ::std::convert::TryFrom<#abi_repr> for #ident {
+        impl TryFrom<#abi_repr> for #ident {
             type Error = #rt::GuestError;
-            fn try_from(value: #abi_repr) -> Result<#ident, #rt::GuestError> {
-                #ident::try_from(value as #repr)
+            fn try_from(value: #abi_repr) -> Result<Self, #rt::GuestError> {
+                #ident::try_from(#repr::try_from(value)?)
             }
         }
 
         impl From<#ident> for #repr {
             fn from(e: #ident) -> #repr {
-                e.0
-            }
-        }
-
-        impl From<#ident> for #abi_repr {
-            fn from(e: #ident) -> #abi_repr {
-                #repr::from(e) as #abi_repr
+                e.bits
             }
         }
 
@@ -177,12 +97,5 @@ pub(super) fn define_flags(names: &Names, name: &witx::Id, f: &witx::FlagsDataty
                 Ok(())
             }
         }
-
-    }
-}
-
-impl super::WiggleType for witx::FlagsDatatype {
-    fn impls_display(&self) -> bool {
-        true
     }
 }

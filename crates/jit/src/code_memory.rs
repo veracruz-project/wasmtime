@@ -5,7 +5,7 @@ use crate::object::{
     ObjectUnwindInfo,
 };
 use crate::unwind::UnwindRegistry;
-use object::read::{File as ObjectFile, Object, ObjectSection};
+use object::read::{File as ObjectFile, Object, ObjectSection, ObjectSymbol};
 use region;
 use std::collections::BTreeMap;
 use std::mem::ManuallyDrop;
@@ -25,7 +25,7 @@ struct CodeMemoryEntry {
 
 impl CodeMemoryEntry {
     fn with_capacity(cap: usize) -> Result<Self, String> {
-        let mmap = ManuallyDrop::new(Mmap::with_at_least(cap)?);
+        let mmap = ManuallyDrop::new(Mmap::with_at_least(cap).map_err(|e| e.to_string())?);
         let registry = ManuallyDrop::new(UnwindRegistry::new(mmap.as_ptr() as usize));
         Ok(Self {
             mmap,
@@ -61,6 +61,15 @@ impl<'a> CodeMemoryObjectAllocation<'a> {
     pub fn code_range(self) -> &'a mut [u8] {
         self.buf
     }
+
+    pub fn funcs_len(&self) -> usize {
+        self.funcs.len()
+    }
+
+    pub fn trampolines_len(&self) -> usize {
+        self.trampolines.len()
+    }
+
     pub fn funcs(&'a self) -> impl Iterator<Item = (FuncIndex, &'a mut [VMFunctionBody])> + 'a {
         let buf = self.buf as *const _ as *mut [u8];
         self.funcs.iter().map(move |(i, (start, len))| {
@@ -69,6 +78,7 @@ impl<'a> CodeMemoryObjectAllocation<'a> {
             })
         })
     }
+
     pub fn trampolines(
         &'a self,
     ) -> impl Iterator<Item = (SignatureIndex, &'a mut [VMFunctionBody])> + 'a {
@@ -292,9 +302,9 @@ impl CodeMemory {
         // Track locations of all defined functions and trampolines.
         let mut funcs = BTreeMap::new();
         let mut trampolines = BTreeMap::new();
-        for (_id, sym) in obj.symbols() {
+        for sym in obj.symbols() {
             match sym.name() {
-                Some(name) => {
+                Ok(name) => {
                     if let Some(index) = try_parse_func_name(name) {
                         let is_import = sym.section_index().is_none();
                         if !is_import {
@@ -308,11 +318,11 @@ impl CodeMemory {
                             .insert(index, (start + sym.address() as usize, sym.size() as usize));
                     }
                 }
-                None => (),
+                Err(_) => (),
             }
         }
 
-        // Register all unwind entiries for functions and trampolines.
+        // Register all unwind entries for functions and trampolines.
         // TODO will `u32` type for start/len be enough for large code base.
         for i in unwind_info {
             match i {

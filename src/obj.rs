@@ -1,6 +1,7 @@
 use anyhow::{bail, Context as _, Result};
 use object::write::Object;
 use target_lexicon::Triple;
+use wasmparser::WasmFeatures;
 use wasmtime::Strategy;
 use wasmtime_environ::{settings, settings::Configurable, ModuleEnvironment, Tunables};
 use wasmtime_jit::{native, Compiler};
@@ -19,6 +20,7 @@ pub fn compile_to_obj(
         None => native::builder(),
     };
     let mut flag_builder = settings::builder();
+    let mut features = WasmFeatures::default();
 
     // There are two possible traps for division, and this way
     // we get the proper one if code traps.
@@ -26,6 +28,7 @@ pub fn compile_to_obj(
 
     if enable_simd {
         flag_builder.enable("enable_simd").unwrap();
+        features.simd = true;
     }
 
     match opt_level {
@@ -43,7 +46,8 @@ pub fn compile_to_obj(
 
     // TODO: Expose the tunables as command-line flags.
     let mut tunables = Tunables::default();
-    tunables.debug_info = debug_info;
+    tunables.generate_native_debuginfo = debug_info;
+    tunables.parse_wasm_debuginfo = debug_info;
 
     let compiler = Compiler::new(
         isa,
@@ -57,12 +61,14 @@ pub fn compile_to_obj(
             s => bail!("unknown compilation strategy {:?}", s),
         },
         tunables.clone(),
+        features.clone(),
     );
 
-    let environ = ModuleEnvironment::new(compiler.isa().frontend_config(), &tunables);
-    let translation = environ
+    let environ = ModuleEnvironment::new(compiler.isa().frontend_config(), &tunables, &features);
+    let (_main_module, mut translation, types) = environ
         .translate(wasm)
         .context("failed to translate module")?;
-    let compilation = compiler.compile(&translation)?;
+    assert_eq!(translation.len(), 1);
+    let compilation = compiler.compile(&mut translation[0], &types)?;
     Ok(compilation.obj)
 }

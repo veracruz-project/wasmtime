@@ -1,4 +1,6 @@
 use anyhow::Result;
+use std::cell::Cell;
+use std::rc::Rc;
 use wasmtime::*;
 
 #[test]
@@ -25,46 +27,45 @@ fn link_twice_bad() -> Result<()> {
     let mut linker = Linker::new(&store);
 
     // functions
-    linker.func("", "", || {})?;
-    assert!(linker.func("", "", || {}).is_err());
+    linker.func("f", "", || {})?;
+    assert!(linker.func("f", "", || {}).is_err());
     assert!(linker
-        .func("", "", || -> Result<(), Trap> { loop {} })
+        .func("f", "", || -> Result<(), Trap> { loop {} })
         .is_err());
-    linker.func("", "", |_: i32| {})?;
 
     // globals
     let ty = GlobalType::new(ValType::I32, Mutability::Const);
     let global = Global::new(&store, ty, Val::I32(0))?;
-    linker.define("", "", global.clone())?;
-    assert!(linker.define("", "", global.clone()).is_err());
+    linker.define("g", "1", global.clone())?;
+    assert!(linker.define("g", "1", global.clone()).is_err());
 
     let ty = GlobalType::new(ValType::I32, Mutability::Var);
     let global = Global::new(&store, ty, Val::I32(0))?;
-    linker.define("", "", global.clone())?;
-    assert!(linker.define("", "", global.clone()).is_err());
+    linker.define("g", "2", global.clone())?;
+    assert!(linker.define("g", "2", global.clone()).is_err());
 
     let ty = GlobalType::new(ValType::I64, Mutability::Const);
     let global = Global::new(&store, ty, Val::I64(0))?;
-    linker.define("", "", global.clone())?;
-    assert!(linker.define("", "", global.clone()).is_err());
+    linker.define("g", "3", global.clone())?;
+    assert!(linker.define("g", "3", global.clone()).is_err());
 
     // memories
     let ty = MemoryType::new(Limits::new(1, None));
-    let memory = Memory::new(&store, ty);
-    linker.define("", "", memory.clone())?;
-    assert!(linker.define("", "", memory.clone()).is_err());
+    let memory = Memory::new(&store, ty)?;
+    linker.define("m", "", memory.clone())?;
+    assert!(linker.define("m", "", memory.clone()).is_err());
     let ty = MemoryType::new(Limits::new(2, None));
-    let memory = Memory::new(&store, ty);
-    assert!(linker.define("", "", memory.clone()).is_err());
+    let memory = Memory::new(&store, ty)?;
+    assert!(linker.define("m", "", memory.clone()).is_err());
 
     // tables
     let ty = TableType::new(ValType::FuncRef, Limits::new(1, None));
     let table = Table::new(&store, ty, Val::FuncRef(None))?;
-    linker.define("", "", table.clone())?;
-    assert!(linker.define("", "", table.clone()).is_err());
+    linker.define("t", "", table.clone())?;
+    assert!(linker.define("t", "", table.clone()).is_err());
     let ty = TableType::new(ValType::FuncRef, Limits::new(2, None));
     let table = Table::new(&store, ty, Val::FuncRef(None))?;
-    assert!(linker.define("", "", table.clone()).is_err());
+    assert!(linker.define("t", "", table.clone()).is_err());
     Ok(())
 }
 
@@ -94,8 +95,8 @@ fn function_interposition() -> Result<()> {
     }
     let instance = linker.instantiate(&module)?;
     let func = instance.get_export("green").unwrap().into_func().unwrap();
-    let func = func.get0::<i32>()?;
-    assert_eq!(func()?, 112);
+    let func = func.typed::<(), i32>()?;
+    assert_eq!(func.call(())?, 112);
     Ok(())
 }
 
@@ -127,8 +128,8 @@ fn function_interposition_renamed() -> Result<()> {
     }
     let instance = linker.instantiate(&module)?;
     let func = instance.get_func("export").unwrap();
-    let func = func.get0::<i32>()?;
-    assert_eq!(func()?, 112);
+    let func = func.typed::<(), i32>()?;
+    assert_eq!(func.call(())?, 112);
     Ok(())
 }
 
@@ -156,7 +157,123 @@ fn module_interposition() -> Result<()> {
     }
     let instance = linker.instantiate(&module)?;
     let func = instance.get_export("export").unwrap().into_func().unwrap();
-    let func = func.get0::<i32>()?;
-    assert_eq!(func()?, 112);
+    let func = func.typed::<(), i32>()?;
+    assert_eq!(func.call(())?, 112);
+    Ok(())
+}
+
+#[test]
+fn allow_unknown_exports() -> Result<()> {
+    let store = Store::default();
+    let mut linker = Linker::new(&store);
+    let module = Module::new(
+        store.engine(),
+        r#"(module (func (export "_start")) (global (export "g") i32 (i32.const 0)))"#,
+    )?;
+
+    assert!(linker.module("module", &module).is_err());
+
+    let mut linker = Linker::new(&store);
+    linker.allow_unknown_exports(true);
+    linker.module("module", &module)?;
+
+    Ok(())
+}
+
+#[test]
+fn no_leak() -> Result<()> {
+    struct DropMe(Rc<Cell<bool>>);
+
+    impl Drop for DropMe {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    let flag = Rc::new(Cell::new(false));
+    {
+        let store = Store::default();
+        let mut linker = Linker::new(&store);
+        let drop_me = DropMe(flag.clone());
+        linker.func("", "", move || drop(&drop_me))?;
+        let module = Module::new(
+            store.engine(),
+            r#"
+                (module
+                    (func (export "_start"))
+                )
+            "#,
+        )?;
+        linker.module("a", &module)?;
+    }
+    assert!(flag.get(), "store was leaked");
+    Ok(())
+}
+
+#[test]
+fn no_leak_with_imports() -> Result<()> {
+    struct DropMe(Rc<Cell<bool>>);
+
+    impl Drop for DropMe {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    let flag = Rc::new(Cell::new(false));
+    {
+        let store = Store::default();
+        let mut linker = Linker::new(&store);
+        let drop_me = DropMe(flag.clone());
+        linker.func("", "", move || drop(&drop_me))?;
+        let module = Module::new(
+            store.engine(),
+            r#"
+                (module
+                    (import "" "" (func))
+                    (func (export "_start"))
+                )
+            "#,
+        )?;
+        linker.module("a", &module)?;
+    }
+    assert!(flag.get(), "store was leaked");
+    Ok(())
+}
+
+#[test]
+fn get_host_function() -> Result<()> {
+    let mut config = Config::default();
+    config.wrap_host_func("mod", "f1", || {});
+
+    let engine = Engine::new(&config)?;
+    let module = Module::new(&engine, r#"(module (import "mod" "f1" (func)))"#)?;
+    let store = Store::new(&engine);
+
+    let linker = Linker::new(&store);
+    assert!(linker.get(&module.imports().nth(0).unwrap()).is_some());
+
+    Ok(())
+}
+
+#[test]
+fn shadowing_host_function() -> Result<()> {
+    let mut config = Config::default();
+    config.wrap_host_func("mod", "f1", || {});
+
+    let engine = Engine::new(&config)?;
+    let store = Store::new(&engine);
+
+    let mut linker = Linker::new(&store);
+    assert!(linker
+        .define("mod", "f1", Func::wrap(&store, || {}))
+        .is_err());
+    linker.define("mod", "f2", Func::wrap(&store, || {}))?;
+
+    let mut linker = Linker::new(&store);
+    linker.allow_shadowing(true);
+    linker.define("mod", "f1", Func::wrap(&store, || {}))?;
+    linker.define("mod", "f2", Func::wrap(&store, || {}))?;
+
     Ok(())
 }

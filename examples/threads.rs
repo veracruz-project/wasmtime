@@ -1,6 +1,6 @@
 // You can execute this example with `cargo run --example threads`
 
-use anyhow::{format_err, Result};
+use anyhow::Result;
 use std::thread;
 use std::time;
 use wasmtime::*;
@@ -8,18 +8,14 @@ use wasmtime::*;
 const N_THREADS: i32 = 10;
 const N_REPS: i32 = 3;
 
-fn print_message(_: Caller<'_>, args: &[Val], _: &mut [Val]) -> Result<(), Trap> {
-    println!("> Thread {} is running", args[0].unwrap_i32());
-    Ok(())
-}
-
 fn run(engine: &Engine, module: Module, id: i32) -> Result<()> {
     let store = Store::new(&engine);
 
     // Create external print functions.
     println!("Creating callback...");
-    let callback_type = FuncType::new(Box::new([ValType::I32]), Box::new([]));
-    let callback_func = Func::new(&store, callback_type, print_message);
+    let callback_func = Func::wrap(&store, |arg: i32| {
+        println!("> Thread {} is running", arg);
+    });
 
     let id_type = GlobalType::new(ValType::I32, Mutability::Const);
     let id_global = Global::new(&store, id_type, Val::I32(id))?;
@@ -30,14 +26,12 @@ fn run(engine: &Engine, module: Module, id: i32) -> Result<()> {
 
     // Extract exports.
     println!("Extracting export...");
-    let g = instance
-        .get_func("run")
-        .ok_or(format_err!("failed to find export `eun`"))?;
+    let g = instance.get_typed_func::<(), ()>("run")?;
 
     for _ in 0..N_REPS {
         thread::sleep(time::Duration::from_millis(100));
         // Call `$run`.
-        drop(g.call(&[])?);
+        drop(g.call(())?);
     }
 
     Ok(())

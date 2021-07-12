@@ -15,28 +15,24 @@ pub enum RichError {
 // trivial function.
 wiggle::from_witx!({
 witx_literal: "
-(typename $errno (enum u8 $ok $invalid_arg $picket_line))
-(typename $s (struct (field $f1 (@witx usize)) (field $f2 (@witx pointer u8))))
-(typename $t (struct (field $f1 u32) (field $f2 f32)))
+(typename $errno (enum (@witx tag u8) $ok $invalid_arg $picket_line))
+(typename $s (record (field $f1 (@witx usize)) (field $f2 (@witx pointer u8))))
+(typename $t (record (field $f1 u32) (field $f2 f32)))
 (module $one_error_conversion
   (@interface func (export \"foo\")
      (param $strike u32)
      (param $s $s)
-     (result $err $errno)
-     (result $t $t)))
+     (result $err (expected $t (error $errno)))))
     ",
-    ctx: WasiCtx,
     errors: { errno => RichError },
 });
 
-// The impl of GuestErrorConversion works just like in every other test where
-// we have a single error type with witx `$errno` with the success called `$ok`
-impl_errno!(types::Errno, types::GuestErrorConversion);
+impl_errno!(types::Errno);
 
 /// When the `errors` mapping in witx is non-empty, we need to impl the
 /// types::UserErrorConversion trait that wiggle generates from that mapping.
 impl<'a> types::UserErrorConversion for WasiCtx<'a> {
-    fn errno_from_rich_error(&self, e: RichError) -> types::Errno {
+    fn errno_from_rich_error(&self, e: RichError) -> Result<types::Errno, wiggle::Trap> {
         wiggle::tracing::debug!(
             rich_error = wiggle::tracing::field::debug(&e),
             "error conversion"
@@ -46,8 +42,8 @@ impl<'a> types::UserErrorConversion for WasiCtx<'a> {
         self.log.borrow_mut().push(e.to_string());
         // Then do the trivial mapping down to the flat enum.
         match e {
-            RichError::InvalidArg { .. } => types::Errno::InvalidArg,
-            RichError::PicketLine { .. } => types::Errno::PicketLine,
+            RichError::InvalidArg { .. } => Ok(types::Errno::InvalidArg),
+            RichError::PicketLine { .. } => Ok(types::Errno::PicketLine),
         }
     }
 }
@@ -90,7 +86,7 @@ fn main() {
     let r0 = one_error_conversion::foo(&ctx, &host_memory, 0, 0, 8);
     assert_eq!(
         r0,
-        i32::from(types::Errno::Ok),
+        Ok(types::Errno::Ok as i32),
         "Expected return value for strike=0"
     );
     assert!(ctx.log.borrow().is_empty(), "No error log for strike=0");
@@ -99,7 +95,7 @@ fn main() {
     let r1 = one_error_conversion::foo(&ctx, &host_memory, 1, 0, 8);
     assert_eq!(
         r1,
-        i32::from(types::Errno::PicketLine),
+        Ok(types::Errno::PicketLine as i32),
         "Expected return value for strike=1"
     );
     assert_eq!(
@@ -112,7 +108,7 @@ fn main() {
     let r2 = one_error_conversion::foo(&ctx, &host_memory, 2, 0, 8);
     assert_eq!(
         r2,
-        i32::from(types::Errno::InvalidArg),
+        Ok(types::Errno::InvalidArg as i32),
         "Expected return value for strike=2"
     );
     assert_eq!(

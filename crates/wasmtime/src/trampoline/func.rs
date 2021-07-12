@@ -1,25 +1,28 @@
 //! Support for a calling of an imported function.
 
-use super::create_handle::create_handle;
-use crate::trampoline::StoreInstanceHandle;
-use crate::{FuncType, Store, Trap};
+use crate::{Config, FuncType, Store, Trap};
 use anyhow::Result;
 use std::any::Any;
 use std::cmp;
-use std::collections::HashMap;
 use std::mem;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::Arc;
 use wasmtime_environ::entity::PrimaryMap;
 use wasmtime_environ::isa::TargetIsa;
-use wasmtime_environ::{ir, settings, CompiledFunction, EntityIndex, Module};
+use wasmtime_environ::wasm::{DefinedFuncIndex, SignatureIndex};
+use wasmtime_environ::{ir, wasm, CompiledFunction, Module, ModuleType};
 use wasmtime_jit::trampoline::ir::{
     ExternalName, Function, InstBuilder, MemFlags, StackSlotData, StackSlotKind,
 };
 use wasmtime_jit::trampoline::{
     self, binemit, pretty_error, Context, FunctionBuilder, FunctionBuilderContext,
 };
-use wasmtime_jit::{native, CodeMemory};
-use wasmtime_runtime::{InstanceHandle, VMContext, VMFunctionBody, VMTrampoline};
+use wasmtime_jit::CodeMemory;
+use wasmtime_jit::{blank_sig, wasmtime_call_conv};
+use wasmtime_runtime::{
+    Imports, InstanceAllocationRequest, InstanceAllocator, InstanceHandle,
+    OnDemandInstanceAllocator, VMContext, VMFunctionBody, VMSharedSignatureIndex, VMTrampoline,
+};
 
 struct TrampolineState {
     func: Box<dyn Fn(*mut VMContext, *mut u128) -> Result<(), Trap>>,
@@ -89,16 +92,7 @@ fn make_trampoline(
     // Mostly reverse copy of the similar method from wasmtime's
     // wasmtime-jit/src/compiler.rs.
     let pointer_type = isa.pointer_type();
-    let mut stub_sig = ir::Signature::new(isa.frontend_config().default_call_conv);
-
-    // Add the caller/callee `vmctx` parameters.
-    stub_sig.params.push(ir::AbiParam::special(
-        pointer_type,
-        ir::ArgumentPurpose::VMContext,
-    ));
-
-    // Add the caller `vmctx` parameter.
-    stub_sig.params.push(ir::AbiParam::new(pointer_type));
+    let mut stub_sig = blank_sig(isa, wasmtime_call_conv(isa));
 
     // Add the `values_vec` parameter.
     stub_sig.params.push(ir::AbiParam::new(pointer_type));
@@ -203,34 +197,46 @@ fn make_trampoline(
         .expect("allocate_for_function")
 }
 
-pub fn create_handle_with_function(
+fn create_function_trampoline(
+    config: &Config,
     ft: &FuncType,
     func: Box<dyn Fn(*mut VMContext, *mut u128) -> Result<(), Trap>>,
-    store: &Store,
-) -> Result<(StoreInstanceHandle, VMTrampoline)> {
+) -> Result<(
+    Module,
+    PrimaryMap<DefinedFuncIndex, *mut [VMFunctionBody]>,
+    VMTrampoline,
+    TrampolineState,
+)> {
     // Note that we specifically enable reference types here in our ISA because
     // `Func::new` is intended to be infallible, but our signature may use
     // reference types which requires safepoints.
-    let isa = store.engine().config().target_isa_with_reference_types();
+    let isa = config.target_isa_with_reference_types();
 
-    let pointer_type = isa.pointer_type();
-    let sig = ft.get_wasmtime_signature(pointer_type);
+    let mut sig = blank_sig(&*isa, wasmtime_call_conv(&*isa));
+    sig.params.extend(
+        ft.params()
+            .map(|p| ir::AbiParam::new(p.get_wasmtime_type())),
+    );
+    sig.returns.extend(
+        ft.results()
+            .map(|p| ir::AbiParam::new(p.get_wasmtime_type())),
+    );
 
     let mut fn_builder_ctx = FunctionBuilderContext::new();
     let mut module = Module::new();
     let mut finished_functions = PrimaryMap::new();
-    let mut trampolines = HashMap::new();
     let mut code_memory = CodeMemory::new();
 
     // First up we manufacture a trampoline which has the ABI specified by `ft`
     // and calls into `stub_fn`...
-    let sig_id = module
-        .signatures
-        .push((ft.to_wasm_func_type(), sig.clone()));
+    let sig_id = SignatureIndex::from_u32(u32::max_value() - 1);
+    module.types.push(ModuleType::Function(sig_id));
+
     let func_id = module.functions.push(sig_id);
     module
         .exports
-        .insert("trampoline".to_string(), EntityIndex::Function(func_id));
+        .insert(String::new(), wasm::EntityIndex::Function(func_id));
+
     let trampoline = make_trampoline(isa.as_ref(), &mut code_memory, &mut fn_builder_ctx, &sig);
     finished_functions.push(trampoline);
 
@@ -244,55 +250,78 @@ pub fn create_handle_with_function(
         &sig,
         mem::size_of::<u128>(),
     )?;
-    let sig_id = store.register_signature(ft.to_wasm_func_type(), sig);
-    trampolines.insert(sig_id, trampoline);
 
-    // Next up we wrap everything up into an `InstanceHandle` by publishing our
-    // code memory (makes it executable) and ensuring all our various bits of
-    // state make it into the instance constructors.
     code_memory.publish(isa.as_ref());
+
     let trampoline_state = TrampolineState { func, code_memory };
-    create_handle(
-        module,
-        store,
-        finished_functions,
-        trampolines,
-        Box::new(trampoline_state),
-        &[],
-    )
-    .map(|instance| (instance, trampoline))
+
+    Ok((module, finished_functions, trampoline, trampoline_state))
 }
 
-pub unsafe fn create_handle_with_raw_function(
+pub fn create_function(
     ft: &FuncType,
+    func: Box<dyn Fn(*mut VMContext, *mut u128) -> Result<(), Trap>>,
+    config: &Config,
+    store: Option<&Store>,
+) -> Result<(InstanceHandle, VMTrampoline)> {
+    let (module, finished_functions, trampoline, trampoline_state) =
+        create_function_trampoline(config, ft, func)?;
+
+    // If there is no store, use the default signature index which is
+    // guaranteed to trap if there is ever an indirect call on the function (should not happen)
+    let shared_signature_id = store
+        .map(|s| {
+            s.signatures()
+                .borrow_mut()
+                .register(ft.as_wasm_func_type(), trampoline)
+        })
+        .unwrap_or(VMSharedSignatureIndex::default());
+
+    unsafe {
+        Ok((
+            OnDemandInstanceAllocator::default().allocate(InstanceAllocationRequest {
+                module: Arc::new(module),
+                finished_functions: &finished_functions,
+                imports: Imports::default(),
+                shared_signatures: shared_signature_id.into(),
+                host_state: Box::new(trampoline_state),
+                interrupts: std::ptr::null(),
+                externref_activations_table: std::ptr::null_mut(),
+                module_info_lookup: None,
+                limiter: None,
+            })?,
+            trampoline,
+        ))
+    }
+}
+
+pub unsafe fn create_raw_function(
     func: *mut [VMFunctionBody],
-    trampoline: VMTrampoline,
-    store: &Store,
-    state: Box<dyn Any>,
-) -> Result<StoreInstanceHandle> {
-    let isa = {
-        let isa_builder = native::builder();
-        let flag_builder = settings::builder();
-        isa_builder.finish(settings::Flags::new(flag_builder))
-    };
-
-    let pointer_type = isa.pointer_type();
-    let sig = ft.get_wasmtime_signature(pointer_type);
-
+    host_state: Box<dyn Any>,
+    shared_signature_id: VMSharedSignatureIndex,
+) -> Result<InstanceHandle> {
     let mut module = Module::new();
     let mut finished_functions = PrimaryMap::new();
-    let mut trampolines = HashMap::new();
 
-    let sig_id = module
-        .signatures
-        .push((ft.to_wasm_func_type(), sig.clone()));
+    let sig_id = SignatureIndex::from_u32(u32::max_value() - 1);
+    module.types.push(ModuleType::Function(sig_id));
     let func_id = module.functions.push(sig_id);
     module
         .exports
-        .insert("trampoline".to_string(), EntityIndex::Function(func_id));
+        .insert(String::new(), wasm::EntityIndex::Function(func_id));
     finished_functions.push(func);
-    let sig_id = store.register_signature(ft.to_wasm_func_type(), sig);
-    trampolines.insert(sig_id, trampoline);
 
-    create_handle(module, store, finished_functions, trampolines, state, &[])
+    Ok(
+        OnDemandInstanceAllocator::default().allocate(InstanceAllocationRequest {
+            module: Arc::new(module),
+            finished_functions: &finished_functions,
+            imports: Imports::default(),
+            shared_signatures: shared_signature_id.into(),
+            host_state,
+            interrupts: std::ptr::null(),
+            externref_activations_table: std::ptr::null_mut(),
+            module_info_lookup: None,
+            limiter: None,
+        })?,
+    )
 }

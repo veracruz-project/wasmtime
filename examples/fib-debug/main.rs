@@ -15,16 +15,13 @@ fn main() -> Result<()> {
     // Load our previously compiled wasm file (built previously with Cargo) and
     // also ensure that we generate debuginfo so this executable can be
     // debugged in GDB.
-    let engine = Engine::new(Config::new().debug_info(true));
+    let engine = Engine::new(Config::new().debug_info(true))?;
     let store = Store::new(&engine);
     let module = Module::from_file(&engine, "target/wasm32-unknown-unknown/debug/fib.wasm")?;
     let instance = Instance::new(&store, &module, &[])?;
 
     // Invoke `fib` export
-    let fib = instance
-        .get_func("fib")
-        .ok_or(anyhow::format_err!("failed to find `fib` function export"))?
-        .get1::<i32, i32>()?;
-    println!("fib(6) = {}", fib(6)?);
+    let fib = instance.get_typed_func::<i32, i32>("fib")?;
+    println!("fib(6) = {}", fib.call(6)?);
     Ok(())
 }

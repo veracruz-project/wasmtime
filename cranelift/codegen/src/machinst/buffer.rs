@@ -142,12 +142,15 @@
 
 use crate::binemit::{Addend, CodeOffset, CodeSink, Reloc, StackMap};
 use crate::ir::{ExternalName, Opcode, SourceLoc, TrapCode};
-use crate::machinst::{BlockIndex, MachInstLabelUse, VCodeInst};
+use crate::isa::unwind::UnwindInst;
+use crate::machinst::{BlockIndex, MachInstLabelUse, VCodeConstant, VCodeConstants, VCodeInst};
 use crate::timing;
+use cranelift_entity::{entity_impl, SecondaryMap};
 
 use log::trace;
 use smallvec::SmallVec;
 use std::mem;
+use std::string::String;
 
 /// A buffer of output to be produced, fixed up, and then emitted to a CodeSink
 /// in bulk.
@@ -171,6 +174,8 @@ pub struct MachBuffer<I: VCodeInst> {
     srclocs: SmallVec<[MachSrcLoc; 64]>,
     /// Any stack maps referring to this code.
     stack_maps: SmallVec<[MachStackMap; 8]>,
+    /// Any unwind info at a given location.
+    unwind_info: SmallVec<[(CodeOffset, UnwindInst); 8]>,
     /// The current source location in progress (after `start_srcloc()` and
     /// before `end_srcloc()`).  This is a (start_offset, src_loc) tuple.
     cur_srcloc: Option<(CodeOffset, SourceLoc)>,
@@ -217,6 +222,8 @@ pub struct MachBuffer<I: VCodeInst> {
     /// when the offset has grown past this (`labels_at_tail_off`) point.
     /// Always <= `cur_offset()`.
     labels_at_tail_off: CodeOffset,
+    /// Map used constants to their [MachLabel].
+    constant_labels: SecondaryMap<VCodeConstant, MachLabel>,
 }
 
 /// A `MachBuffer` once emission is completed: holds generated code and records,
@@ -236,6 +243,8 @@ pub struct MachBufferFinalized {
     srclocs: SmallVec<[MachSrcLoc; 64]>,
     /// Any stack maps referring to this code.
     stack_maps: SmallVec<[MachStackMap; 8]>,
+    /// Any unwind info at a given location.
+    pub unwind_info: SmallVec<[(CodeOffset, UnwindInst); 8]>,
 }
 
 static UNKNOWN_LABEL_OFFSET: CodeOffset = 0xffff_ffff;
@@ -247,6 +256,7 @@ static UNKNOWN_LABEL: MachLabel = MachLabel(0xffff_ffff);
 /// appropriately when the label's location is eventually known.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MachLabel(u32);
+entity_impl!(MachLabel);
 
 impl MachLabel {
     /// Get a label for a block. (The first N MachLabels are always reseved for
@@ -258,6 +268,17 @@ impl MachLabel {
     /// Get the numeric label index.
     pub fn get(self) -> u32 {
         self.0
+    }
+
+    /// Creates a string representing this label, for convenience.
+    pub fn to_string(&self) -> String {
+        format!("label{}", self.0)
+    }
+}
+
+impl Default for MachLabel {
+    fn default() -> Self {
+        UNKNOWN_LABEL
     }
 }
 
@@ -283,6 +304,7 @@ impl<I: VCodeInst> MachBuffer<I> {
             call_sites: SmallVec::new(),
             srclocs: SmallVec::new(),
             stack_maps: SmallVec::new(),
+            unwind_info: SmallVec::new(),
             cur_srcloc: None,
             label_offsets: SmallVec::new(),
             label_aliases: SmallVec::new(),
@@ -293,6 +315,7 @@ impl<I: VCodeInst> MachBuffer<I> {
             latest_branches: SmallVec::new(),
             labels_at_tail: SmallVec::new(),
             labels_at_tail_off: 0,
+            constant_labels: SecondaryMap::new(),
         }
     }
 
@@ -460,6 +483,24 @@ impl<I: VCodeInst> MachBuffer<I> {
         self.label_aliases.resize(blocks as usize, UNKNOWN_LABEL);
 
         // Post-invariant: as for `get_label()`.
+    }
+
+    /// Reserve the next N MachLabels for constants.
+    pub fn reserve_labels_for_constants(&mut self, constants: &VCodeConstants) {
+        trace!(
+            "MachBuffer: next {} labels are for constants",
+            constants.len()
+        );
+        for c in constants.keys() {
+            self.constant_labels[c] = self.get_label();
+        }
+
+        // Post-invariant: as for `get_label()`.
+    }
+
+    /// Retrieve the reserved label for a constant.
+    pub fn get_label_for_constant(&self, constant: VCodeConstant) -> MachLabel {
+        self.constant_labels[constant]
     }
 
     /// Bind a label to the current offset. A label can only be bound once.
@@ -639,6 +680,12 @@ impl<I: VCodeInst> MachBuffer<I> {
         //    (end of buffer)
         self.data.truncate(b.start as usize);
         self.fixup_records.truncate(b.fixup);
+        while let Some(last_srcloc) = self.srclocs.last() {
+            if last_srcloc.end <= b.start {
+                break;
+            }
+            self.srclocs.pop();
+        }
         // State:
         //    [PRE CODE]
         //  cur_off, Offset b.start, b.labels_at_this_branch:
@@ -992,9 +1039,16 @@ impl<I: VCodeInst> MachBuffer<I> {
         data: &[u8],
         max_distance: CodeOffset,
     ) {
-        let deadline = self.cur_offset() + max_distance;
+        trace!(
+            "defer_constant: eventually emit {} bytes aligned to {} at label {:?}",
+            data.len(),
+            align,
+            label
+        );
+        let deadline = self.cur_offset().saturating_add(max_distance);
         self.island_worst_case_size += data.len() as CodeOffset;
-        self.island_worst_case_size &= !(I::LabelUse::ALIGN - 1);
+        self.island_worst_case_size =
+            (self.island_worst_case_size + I::LabelUse::ALIGN - 1) & !(I::LabelUse::ALIGN - 1);
         self.pending_constants.push(MachLabelConstant {
             label,
             align,
@@ -1130,14 +1184,6 @@ impl<I: VCodeInst> MachBuffer<I> {
     pub fn finish(mut self) -> MachBufferFinalized {
         let _tt = timing::vcode_emit_finish();
 
-        // Ensure that all labels are defined. This is a full (release-mode)
-        // assert because we must avoid looping indefinitely below; an
-        // unresolved label will prevent the fixup_records vec from emptying.
-        assert!(self
-            .label_offsets
-            .iter()
-            .all(|&off| off != UNKNOWN_LABEL_OFFSET));
-
         while !self.pending_constants.is_empty() || !self.fixup_records.is_empty() {
             // `emit_island()` will emit any pending veneers and constants, and
             // as a side-effect, will also take care of any fixups with resolved
@@ -1145,13 +1191,22 @@ impl<I: VCodeInst> MachBuffer<I> {
             self.emit_island();
         }
 
+        // Ensure that all labels have been fixed up after the last island is emitted. This is a
+        // full (release-mode) assert because an unresolved label means the emitted code is
+        // incorrect.
+        assert!(self.fixup_records.is_empty());
+
+        let mut srclocs = self.srclocs;
+        srclocs.sort_by_key(|entry| entry.start);
+
         MachBufferFinalized {
             data: self.data,
             relocs: self.relocs,
             traps: self.traps,
             call_sites: self.call_sites,
-            srclocs: self.srclocs,
+            srclocs,
             stack_maps: self.stack_maps,
+            unwind_info: self.unwind_info,
         }
     }
 
@@ -1189,6 +1244,11 @@ impl<I: VCodeInst> MachBuffer<I> {
             srcloc,
             opcode,
         });
+    }
+
+    /// Add an unwind record at the current offset.
+    pub fn add_unwind(&mut self, unwind: UnwindInst) {
+        self.unwind_info.push((self.cur_offset(), unwind));
     }
 
     /// Set the `SourceLoc` for code from this offset until the offset at the
@@ -1266,26 +1326,25 @@ impl MachBufferFinalized {
         let mut next_trap = 0;
         let mut next_call_site = 0;
         for (idx, byte) in self.data.iter().enumerate() {
-            if next_reloc < self.relocs.len() {
+            while next_reloc < self.relocs.len()
+                && self.relocs[next_reloc].offset == idx as CodeOffset
+            {
                 let reloc = &self.relocs[next_reloc];
-                if reloc.offset == idx as CodeOffset {
-                    sink.reloc_external(reloc.srcloc, reloc.kind, &reloc.name, reloc.addend);
-                    next_reloc += 1;
-                }
+                sink.reloc_external(reloc.srcloc, reloc.kind, &reloc.name, reloc.addend);
+                next_reloc += 1;
             }
-            if next_trap < self.traps.len() {
+            while next_trap < self.traps.len() && self.traps[next_trap].offset == idx as CodeOffset
+            {
                 let trap = &self.traps[next_trap];
-                if trap.offset == idx as CodeOffset {
-                    sink.trap(trap.code, trap.srcloc);
-                    next_trap += 1;
-                }
+                sink.trap(trap.code, trap.srcloc);
+                next_trap += 1;
             }
-            if next_call_site < self.call_sites.len() {
+            while next_call_site < self.call_sites.len()
+                && self.call_sites[next_call_site].ret_addr == idx as CodeOffset
+            {
                 let call_site = &self.call_sites[next_call_site];
-                if call_site.ret_addr == idx as CodeOffset {
-                    sink.add_call_site(call_site.opcode, call_site.srcloc);
-                    next_call_site += 1;
-                }
+                sink.add_call_site(call_site.opcode, call_site.srcloc);
+                next_call_site += 1;
             }
             sink.put1(*byte);
         }
@@ -1420,11 +1479,14 @@ impl MachBranch {
 #[cfg(all(test, feature = "arm64"))]
 mod test {
     use super::*;
+    use crate::ir::{ConstantOffset, Function, JumpTable, Value};
     use crate::isa::aarch64::inst::xreg;
-    use crate::isa::aarch64::inst::{BranchTarget, CondBrKind, Inst};
+    use crate::isa::aarch64::inst::{BranchTarget, CondBrKind, EmitInfo, Inst};
+    use crate::isa::TargetIsa;
     use crate::machinst::MachInstEmit;
     use crate::settings;
     use std::default::Default;
+    use std::vec::Vec;
 
     fn label(n: u32) -> MachLabel {
         MachLabel::from_block(n)
@@ -1435,14 +1497,14 @@ mod test {
 
     #[test]
     fn test_elide_jump_to_next() {
-        let flags = settings::Flags::new(settings::builder());
+        let info = EmitInfo::new(settings::Flags::new(settings::builder()));
         let mut buf = MachBuffer::new();
         let mut state = Default::default();
 
         buf.reserve_labels_for_blocks(2);
         buf.bind_label(label(0));
         let inst = Inst::Jump { dest: target(1) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
         buf.bind_label(label(1));
         let buf = buf.finish();
         assert_eq!(0, buf.total_size());
@@ -1450,7 +1512,7 @@ mod test {
 
     #[test]
     fn test_elide_trivial_jump_blocks() {
-        let flags = settings::Flags::new(settings::builder());
+        let info = EmitInfo::new(settings::Flags::new(settings::builder()));
         let mut buf = MachBuffer::new();
         let mut state = Default::default();
 
@@ -1462,15 +1524,15 @@ mod test {
             taken: target(1),
             not_taken: target(2),
         };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(1));
         let inst = Inst::Jump { dest: target(3) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(2));
         let inst = Inst::Jump { dest: target(3) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(3));
 
@@ -1480,7 +1542,7 @@ mod test {
 
     #[test]
     fn test_flip_cond() {
-        let flags = settings::Flags::new(settings::builder());
+        let info = EmitInfo::new(settings::Flags::new(settings::builder()));
         let mut buf = MachBuffer::new();
         let mut state = Default::default();
 
@@ -1492,17 +1554,17 @@ mod test {
             taken: target(1),
             not_taken: target(2),
         };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(1));
         let inst = Inst::Udf {
-            trap_info: (SourceLoc::default(), TrapCode::Interrupt),
+            trap_code: TrapCode::Interrupt,
         };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(2));
         let inst = Inst::Nop4;
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(3));
 
@@ -1512,11 +1574,11 @@ mod test {
         let mut state = Default::default();
         let inst = Inst::TrapIf {
             kind: CondBrKind::NotZero(xreg(0)),
-            trap_info: (SourceLoc::default(), TrapCode::Interrupt),
+            trap_code: TrapCode::Interrupt,
         };
-        inst.emit(&mut buf2, &flags, &mut state);
+        inst.emit(&mut buf2, &info, &mut state);
         let inst = Inst::Nop4;
-        inst.emit(&mut buf2, &flags, &mut state);
+        inst.emit(&mut buf2, &info, &mut state);
 
         let buf2 = buf2.finish();
 
@@ -1525,7 +1587,7 @@ mod test {
 
     #[test]
     fn test_island() {
-        let flags = settings::Flags::new(settings::builder());
+        let info = EmitInfo::new(settings::Flags::new(settings::builder()));
         let mut buf = MachBuffer::new();
         let mut state = Default::default();
 
@@ -1537,7 +1599,7 @@ mod test {
             taken: target(2),
             not_taken: target(3),
         };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(1));
         while buf.cur_offset() < 2000000 {
@@ -1545,16 +1607,16 @@ mod test {
                 buf.emit_island();
             }
             let inst = Inst::Nop4;
-            inst.emit(&mut buf, &flags, &mut state);
+            inst.emit(&mut buf, &info, &mut state);
         }
 
         buf.bind_label(label(2));
         let inst = Inst::Nop4;
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(3));
         let inst = Inst::Nop4;
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         let buf = buf.finish();
 
@@ -1567,7 +1629,7 @@ mod test {
             taken: BranchTarget::ResolvedOffset(1048576 - 4),
             not_taken: BranchTarget::ResolvedOffset(2000000 + 4 - 4),
         };
-        inst.emit(&mut buf2, &flags, &mut state);
+        inst.emit(&mut buf2, &info, &mut state);
 
         let buf2 = buf2.finish();
 
@@ -1576,7 +1638,7 @@ mod test {
 
     #[test]
     fn test_island_backward() {
-        let flags = settings::Flags::new(settings::builder());
+        let info = EmitInfo::new(settings::Flags::new(settings::builder()));
         let mut buf = MachBuffer::new();
         let mut state = Default::default();
 
@@ -1584,16 +1646,16 @@ mod test {
 
         buf.bind_label(label(0));
         let inst = Inst::Nop4;
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(1));
         let inst = Inst::Nop4;
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(2));
         while buf.cur_offset() < 2000000 {
             let inst = Inst::Nop4;
-            inst.emit(&mut buf, &flags, &mut state);
+            inst.emit(&mut buf, &info, &mut state);
         }
 
         buf.bind_label(label(3));
@@ -1602,7 +1664,7 @@ mod test {
             taken: target(0),
             not_taken: target(1),
         };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         let buf = buf.finish();
 
@@ -1615,11 +1677,11 @@ mod test {
             taken: BranchTarget::ResolvedOffset(8),
             not_taken: BranchTarget::ResolvedOffset(4 - (2000000 + 4)),
         };
-        inst.emit(&mut buf2, &flags, &mut state);
+        inst.emit(&mut buf2, &info, &mut state);
         let inst = Inst::Jump {
             dest: BranchTarget::ResolvedOffset(-(2000000 + 8)),
         };
-        inst.emit(&mut buf2, &flags, &mut state);
+        inst.emit(&mut buf2, &info, &mut state);
 
         let buf2 = buf2.finish();
 
@@ -1661,7 +1723,7 @@ mod test {
         // label7:
         //   ret
 
-        let flags = settings::Flags::new(settings::builder());
+        let info = EmitInfo::new(settings::Flags::new(settings::builder()));
         let mut buf = MachBuffer::new();
         let mut state = Default::default();
 
@@ -1673,38 +1735,38 @@ mod test {
             taken: target(1),
             not_taken: target(2),
         };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(1));
         let inst = Inst::Jump { dest: target(3) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(2));
         let inst = Inst::Nop4;
-        inst.emit(&mut buf, &flags, &mut state);
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
         let inst = Inst::Jump { dest: target(0) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(3));
         let inst = Inst::Jump { dest: target(4) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(4));
         let inst = Inst::Jump { dest: target(5) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(5));
         let inst = Inst::Jump { dest: target(7) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(6));
         let inst = Inst::Nop4;
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(7));
         let inst = Inst::Ret;
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         let buf = buf.finish();
 
@@ -1737,7 +1799,7 @@ mod test {
         //
         // label0, label1, ..., label4:
         //   b label0
-        let flags = settings::Flags::new(settings::builder());
+        let info = EmitInfo::new(settings::Flags::new(settings::builder()));
         let mut buf = MachBuffer::new();
         let mut state = Default::default();
 
@@ -1745,23 +1807,23 @@ mod test {
 
         buf.bind_label(label(0));
         let inst = Inst::Jump { dest: target(1) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(1));
         let inst = Inst::Jump { dest: target(2) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(2));
         let inst = Inst::Jump { dest: target(3) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(3));
         let inst = Inst::Jump { dest: target(4) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         buf.bind_label(label(4));
         let inst = Inst::Jump { dest: target(1) };
-        inst.emit(&mut buf, &flags, &mut state);
+        inst.emit(&mut buf, &info, &mut state);
 
         let buf = buf.finish();
 
@@ -1770,5 +1832,91 @@ mod test {
         ];
 
         assert_eq!(&golden_data[..], &buf.data[..]);
+    }
+
+    #[test]
+    fn metadata_records() {
+        let mut buf = MachBuffer::<Inst>::new();
+
+        buf.reserve_labels_for_blocks(1);
+
+        buf.bind_label(label(0));
+        buf.put1(1);
+        buf.add_trap(SourceLoc::default(), TrapCode::HeapOutOfBounds);
+        buf.put1(2);
+        buf.add_trap(SourceLoc::default(), TrapCode::IntegerOverflow);
+        buf.add_trap(SourceLoc::default(), TrapCode::IntegerDivisionByZero);
+        buf.add_call_site(SourceLoc::default(), Opcode::Call);
+        buf.add_reloc(
+            SourceLoc::default(),
+            Reloc::Abs4,
+            &ExternalName::user(0, 0),
+            0,
+        );
+        buf.put1(3);
+        buf.add_reloc(
+            SourceLoc::default(),
+            Reloc::Abs8,
+            &ExternalName::user(1, 1),
+            1,
+        );
+        buf.put1(4);
+
+        let buf = buf.finish();
+
+        #[derive(Default)]
+        struct TestCodeSink {
+            offset: CodeOffset,
+            traps: Vec<(CodeOffset, TrapCode)>,
+            callsites: Vec<(CodeOffset, Opcode)>,
+            relocs: Vec<(CodeOffset, Reloc)>,
+        }
+        impl CodeSink for TestCodeSink {
+            fn offset(&self) -> CodeOffset {
+                self.offset
+            }
+            fn put1(&mut self, _: u8) {
+                self.offset += 1;
+            }
+            fn put2(&mut self, _: u16) {
+                self.offset += 2;
+            }
+            fn put4(&mut self, _: u32) {
+                self.offset += 4;
+            }
+            fn put8(&mut self, _: u64) {
+                self.offset += 8;
+            }
+            fn reloc_external(&mut self, _: SourceLoc, r: Reloc, _: &ExternalName, _: Addend) {
+                self.relocs.push((self.offset, r));
+            }
+            fn reloc_constant(&mut self, _: Reloc, _: ConstantOffset) {}
+            fn reloc_jt(&mut self, _: Reloc, _: JumpTable) {}
+            fn trap(&mut self, t: TrapCode, _: SourceLoc) {
+                self.traps.push((self.offset, t));
+            }
+            fn begin_jumptables(&mut self) {}
+            fn begin_rodata(&mut self) {}
+            fn end_codegen(&mut self) {}
+            fn add_stack_map(&mut self, _: &[Value], _: &Function, _: &dyn TargetIsa) {}
+            fn add_call_site(&mut self, op: Opcode, _: SourceLoc) {
+                self.callsites.push((self.offset, op));
+            }
+        }
+
+        let mut sink = TestCodeSink::default();
+        buf.emit(&mut sink);
+
+        assert_eq!(sink.offset, 4);
+        assert_eq!(
+            sink.traps,
+            vec![
+                (1, TrapCode::HeapOutOfBounds),
+                (2, TrapCode::IntegerOverflow),
+                (2, TrapCode::IntegerDivisionByZero)
+            ]
+        );
+        assert_eq!(sink.callsites, vec![(2, Opcode::Call),]);
+        assert_eq!(sink.relocs, vec![(2, Reloc::Abs4), (3, Reloc::Abs8)]);
     }
 }

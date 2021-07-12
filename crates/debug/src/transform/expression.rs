@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use wasmtime_environ::entity::EntityRef;
-use wasmtime_environ::ir::{StackSlots, ValueLabel, ValueLabelsRanges, ValueLoc};
+use wasmtime_environ::ir::{LabelValueLoc, StackSlots, ValueLabel, ValueLabelsRanges, ValueLoc};
 use wasmtime_environ::isa::TargetIsa;
 use wasmtime_environ::wasm::{get_vmctx_value_label, DefinedFuncIndex};
 use wasmtime_environ::ModuleMemoryOffset;
@@ -131,27 +131,24 @@ impl CompiledExpression {
 const X86_64_STACK_OFFSET: i64 = 16;
 
 fn translate_loc(
-    loc: ValueLoc,
+    loc: LabelValueLoc,
     frame_info: Option<&FunctionFrameInfo>,
     isa: &dyn TargetIsa,
     add_stack_value: bool,
 ) -> Result<Option<Vec<u8>>> {
     Ok(match loc {
-        ValueLoc::Reg(reg) if add_stack_value => {
+        LabelValueLoc::ValueLoc(ValueLoc::Reg(reg)) => {
             let machine_reg = isa.map_dwarf_register(reg)?;
             let mut writer = ExpressionWriter::new();
-            writer.write_op_reg(machine_reg)?;
+            if add_stack_value {
+                writer.write_op_reg(machine_reg)?;
+            } else {
+                writer.write_op_breg(machine_reg)?;
+                writer.write_sleb128(0)?;
+            }
             Some(writer.into_vec())
         }
-        ValueLoc::Reg(reg) => {
-            assert!(!add_stack_value);
-            let machine_reg = isa.map_dwarf_register(reg)?;
-            let mut writer = ExpressionWriter::new();
-            writer.write_op_breg(machine_reg)?;
-            writer.write_sleb128(0)?;
-            Some(writer.into_vec())
-        }
-        ValueLoc::Stack(ss) => {
+        LabelValueLoc::ValueLoc(ValueLoc::Stack(ss)) => {
             if let Some(frame_info) = frame_info {
                 if let Some(ss_offset) = frame_info.stack_slots[ss].offset {
                     let mut writer = ExpressionWriter::new();
@@ -165,6 +162,27 @@ fn translate_loc(
             }
             None
         }
+        LabelValueLoc::Reg(r) => {
+            let machine_reg = isa.map_regalloc_reg_to_dwarf(r)?;
+            let mut writer = ExpressionWriter::new();
+            if add_stack_value {
+                writer.write_op_reg(machine_reg)?;
+            } else {
+                writer.write_op_breg(machine_reg)?;
+                writer.write_sleb128(0)?;
+            }
+            Some(writer.into_vec())
+        }
+        LabelValueLoc::SPOffset(off) => {
+            let mut writer = ExpressionWriter::new();
+            writer.write_op_breg(X86_64::RSP.0)?;
+            writer.write_sleb128(off)?;
+            if !add_stack_value {
+                writer.write_op(gimli::constants::DW_OP_deref)?;
+            }
+            return Ok(Some(writer.into_vec()));
+        }
+
         _ => None,
     })
 }
@@ -172,13 +190,13 @@ fn translate_loc(
 fn append_memory_deref(
     buf: &mut Vec<u8>,
     frame_info: &FunctionFrameInfo,
-    vmctx_loc: ValueLoc,
+    vmctx_loc: LabelValueLoc,
     isa: &dyn TargetIsa,
 ) -> Result<bool> {
     let mut writer = ExpressionWriter::new();
     // FIXME for imported memory
     match vmctx_loc {
-        ValueLoc::Reg(vmctx_reg) => {
+        LabelValueLoc::ValueLoc(ValueLoc::Reg(vmctx_reg)) => {
             let reg = isa.map_dwarf_register(vmctx_reg)? as u8;
             writer.write_u8(gimli::constants::DW_OP_breg0.0 + reg)?;
             let memory_offset = match frame_info.vmctx_memory_offset() {
@@ -189,7 +207,7 @@ fn append_memory_deref(
             };
             writer.write_sleb128(memory_offset)?;
         }
-        ValueLoc::Stack(ss) => {
+        LabelValueLoc::ValueLoc(ValueLoc::Stack(ss)) => {
             if let Some(ss_offset) = frame_info.stack_slots[ss].offset {
                 writer.write_op_breg(X86_64::RBP.0)?;
                 writer.write_sleb128(ss_offset as i64 + X86_64_STACK_OFFSET)?;
@@ -206,6 +224,31 @@ fn append_memory_deref(
             } else {
                 return Ok(false);
             }
+        }
+        LabelValueLoc::Reg(r) => {
+            let reg = isa.map_regalloc_reg_to_dwarf(r)?;
+            writer.write_op_breg(reg)?;
+            let memory_offset = match frame_info.vmctx_memory_offset() {
+                Some(offset) => offset,
+                None => {
+                    return Ok(false);
+                }
+            };
+            writer.write_sleb128(memory_offset)?;
+        }
+        LabelValueLoc::SPOffset(off) => {
+            writer.write_op_breg(X86_64::RSP.0)?;
+            writer.write_sleb128(off)?;
+            writer.write_op(gimli::constants::DW_OP_deref)?;
+            writer.write_op(gimli::constants::DW_OP_consts)?;
+            let memory_offset = match frame_info.vmctx_memory_offset() {
+                Some(offset) => offset,
+                None => {
+                    return Ok(false);
+                }
+            };
+            writer.write_sleb128(memory_offset)?;
+            writer.write_op(gimli::constants::DW_OP_plus)?;
         }
         _ => {
             return Ok(false);
@@ -468,25 +511,29 @@ where
                 let _ = code_chunk; // suppresses warning for final flush
             }
         };
-    };
+    }
+
     // Find all landing pads by scanning bytes, do not care about
     // false location at this moment.
     // Looks hacky but it is fast; does not need to be really exact.
-    for i in 0..buf.len() - 2 {
-        let op = buf[i];
-        if op == gimli::constants::DW_OP_bra.0 || op == gimli::constants::DW_OP_skip.0 {
-            // TODO fix for big-endian
-            let offset = i16::from_le_bytes([buf[i + 1], buf[i + 2]]);
-            let origin = i + 3;
-            // Discarding out-of-bounds jumps (also some of falsely detected ops)
-            if (offset >= 0 && offset as usize + origin <= buf.len())
-                || (offset < 0 && -offset as usize <= origin)
-            {
-                let target = buf.len() as isize - origin as isize - offset as isize;
-                jump_targets.insert(target as u64, JumpTargetMarker::new());
+    if buf.len() > 2 {
+        for i in 0..buf.len() - 2 {
+            let op = buf[i];
+            if op == gimli::constants::DW_OP_bra.0 || op == gimli::constants::DW_OP_skip.0 {
+                // TODO fix for big-endian
+                let offset = i16::from_le_bytes([buf[i + 1], buf[i + 2]]);
+                let origin = i + 3;
+                // Discarding out-of-bounds jumps (also some of falsely detected ops)
+                if (offset >= 0 && offset as usize + origin <= buf.len())
+                    || (offset < 0 && -offset as usize <= origin)
+                {
+                    let target = buf.len() as isize - origin as isize - offset as isize;
+                    jump_targets.insert(target as u64, JumpTargetMarker::new());
+                }
             }
         }
     }
+
     while !pc.is_empty() {
         let unread_bytes = pc.len().into_u64();
         if let Some(marker) = jump_targets.get(&unread_bytes) {
@@ -494,134 +541,145 @@ where
             parts.push(CompiledExpressionPart::LandingPad(marker.clone()));
         }
 
-        let next = buf[pc.offset_from(&expr.0).into_u64() as usize];
         need_deref = true;
-        if next == 0xED {
-            // WebAssembly DWARF extension
-            pc.read_u8()?;
-            let ty = pc.read_uleb128()?;
-            // Supporting only wasm locals.
-            if ty != 0 {
-                // TODO support wasm globals?
+
+        let pos = pc.offset_from(&expr.0).into_u64() as usize;
+        let op = Operation::parse(&mut pc, encoding)?;
+        match op {
+            Operation::FrameOffset { offset } => {
+                // Expand DW_OP_fbreg into frame location and DW_OP_plus_uconst.
+                if frame_base.is_some() {
+                    // Add frame base expressions.
+                    flush_code_chunk!();
+                    parts.extend_from_slice(&frame_base.unwrap().parts);
+                }
+                if let Some(CompiledExpressionPart::Local { trailing, .. }) = parts.last_mut() {
+                    // Reset local trailing flag.
+                    *trailing = false;
+                }
+                // Append DW_OP_plus_uconst part.
+                let mut writer = ExpressionWriter::new();
+                writer.write_op(gimli::constants::DW_OP_plus_uconst)?;
+                writer.write_uleb128(offset as u64)?;
+                code_chunk.extend(writer.into_vec());
+                continue;
+            }
+            Operation::Drop { .. }
+            | Operation::Pick { .. }
+            | Operation::Swap { .. }
+            | Operation::Rot { .. }
+            | Operation::Nop { .. }
+            | Operation::UnsignedConstant { .. }
+            | Operation::SignedConstant { .. }
+            | Operation::ConstantIndex { .. }
+            | Operation::PlusConstant { .. }
+            | Operation::Abs { .. }
+            | Operation::And { .. }
+            | Operation::Or { .. }
+            | Operation::Xor { .. }
+            | Operation::Shl { .. }
+            | Operation::Plus { .. }
+            | Operation::Minus { .. }
+            | Operation::Div { .. }
+            | Operation::Mod { .. }
+            | Operation::Mul { .. }
+            | Operation::Neg { .. }
+            | Operation::Not { .. }
+            | Operation::Lt { .. }
+            | Operation::Gt { .. }
+            | Operation::Le { .. }
+            | Operation::Ge { .. }
+            | Operation::Eq { .. }
+            | Operation::Ne { .. }
+            | Operation::TypedLiteral { .. }
+            | Operation::Convert { .. }
+            | Operation::Reinterpret { .. }
+            | Operation::Piece { .. } => (),
+            Operation::Bra { target } | Operation::Skip { target } => {
+                flush_code_chunk!();
+                let arc_to = (pc.len().into_u64() as isize - target as isize) as u64;
+                let marker = match jump_targets.get(&arc_to) {
+                    Some(m) => m.clone(),
+                    None => {
+                        // Marker not found: probably out of bounds.
+                        return Ok(None);
+                    }
+                };
+                push!(CompiledExpressionPart::Jump {
+                    conditionally: match op {
+                        Operation::Bra { .. } => true,
+                        _ => false,
+                    },
+                    target: marker,
+                });
+                continue;
+            }
+            Operation::StackValue => {
+                need_deref = false;
+
+                // Find extra stack_value, that follow wasm-local operators,
+                // and mark such locals with special flag.
+                if let (Some(CompiledExpressionPart::Local { trailing, .. }), true) =
+                    (parts.last_mut(), code_chunk.is_empty())
+                {
+                    *trailing = true;
+                    continue;
+                }
+            }
+            Operation::Deref { .. } => {
+                flush_code_chunk!();
+                push!(CompiledExpressionPart::Deref);
+                // Don't re-enter the loop here (i.e. continue), because the
+                // DW_OP_deref still needs to be kept.
+            }
+            Operation::WasmLocal { index } => {
+                flush_code_chunk!();
+                let label = ValueLabel::from_u32(index as u32);
+                push!(CompiledExpressionPart::Local {
+                    label,
+                    trailing: false,
+                });
+                continue;
+            }
+            Operation::Shr { .. } | Operation::Shra { .. } => {
+                // Insert value normalisation part.
+                // The semantic value is 32 bits (TODO: check unit)
+                // but the target architecture is 64-bits. So we'll
+                // clean out the upper 32 bits (in a sign-correct way)
+                // to avoid contamination of the result with randomness.
+                let mut writer = ExpressionWriter::new();
+                writer.write_op(gimli::constants::DW_OP_plus_uconst)?;
+                writer.write_uleb128(32)?; // increase shift amount
+                writer.write_op(gimli::constants::DW_OP_swap)?;
+                writer.write_op(gimli::constants::DW_OP_const1u)?;
+                writer.write_u8(32)?;
+                writer.write_op(gimli::constants::DW_OP_shl)?;
+                writer.write_op(gimli::constants::DW_OP_swap)?;
+                code_chunk.extend(writer.into_vec());
+                // Don't re-enter the loop here (i.e. continue), because the
+                // DW_OP_shr* still needs to be kept.
+            }
+            Operation::Address { .. }
+            | Operation::AddressIndex { .. }
+            | Operation::Call { .. }
+            | Operation::Register { .. }
+            | Operation::RegisterOffset { .. }
+            | Operation::CallFrameCFA
+            | Operation::PushObjectAddress
+            | Operation::TLS
+            | Operation::ImplicitValue { .. }
+            | Operation::ImplicitPointer { .. }
+            | Operation::EntryValue { .. }
+            | Operation::ParameterRef { .. } => {
                 return Ok(None);
             }
-            let index = pc.read_sleb128()?;
-            flush_code_chunk!();
-            let label = ValueLabel::from_u32(index as u32);
-            push!(CompiledExpressionPart::Local {
-                label,
-                trailing: false,
-            });
-        } else {
-            let pos = pc.offset_from(&expr.0).into_u64() as usize;
-            let op = Operation::parse(&mut pc, encoding)?;
-            match op {
-                Operation::FrameOffset { offset } => {
-                    // Expand DW_OP_fbreg into frame location and DW_OP_plus_uconst.
-                    if frame_base.is_some() {
-                        // Add frame base expressions.
-                        flush_code_chunk!();
-                        parts.extend_from_slice(&frame_base.unwrap().parts);
-                    }
-                    if let Some(CompiledExpressionPart::Local { trailing, .. }) = parts.last_mut() {
-                        // Reset local trailing flag.
-                        *trailing = false;
-                    }
-                    // Append DW_OP_plus_uconst part.
-                    let mut writer = ExpressionWriter::new();
-                    writer.write_op(gimli::constants::DW_OP_plus_uconst)?;
-                    writer.write_uleb128(offset as u64)?;
-                    code_chunk.extend(writer.into_vec());
-                    continue;
-                }
-                Operation::Drop { .. }
-                | Operation::Pick { .. }
-                | Operation::Swap { .. }
-                | Operation::Rot { .. }
-                | Operation::Nop { .. }
-                | Operation::UnsignedConstant { .. }
-                | Operation::SignedConstant { .. }
-                | Operation::ConstantIndex { .. }
-                | Operation::PlusConstant { .. }
-                | Operation::Abs { .. }
-                | Operation::And { .. }
-                | Operation::Or { .. }
-                | Operation::Xor { .. }
-                | Operation::Shr { .. }
-                | Operation::Shra { .. }
-                | Operation::Shl { .. }
-                | Operation::Plus { .. }
-                | Operation::Minus { .. }
-                | Operation::Div { .. }
-                | Operation::Mod { .. }
-                | Operation::Mul { .. }
-                | Operation::Neg { .. }
-                | Operation::Not { .. }
-                | Operation::Lt { .. }
-                | Operation::Gt { .. }
-                | Operation::Le { .. }
-                | Operation::Ge { .. }
-                | Operation::Eq { .. }
-                | Operation::Ne { .. }
-                | Operation::TypedLiteral { .. }
-                | Operation::Convert { .. }
-                | Operation::Reinterpret { .. }
-                | Operation::Piece { .. } => (),
-                Operation::Bra { target } | Operation::Skip { target } => {
-                    flush_code_chunk!();
-                    let arc_to = (pc.len().into_u64() as isize - target as isize) as u64;
-                    let marker = match jump_targets.get(&arc_to) {
-                        Some(m) => m.clone(),
-                        None => {
-                            // Marker not found: probably out of bounds.
-                            return Ok(None);
-                        }
-                    };
-                    push!(CompiledExpressionPart::Jump {
-                        conditionally: match op {
-                            Operation::Bra { .. } => true,
-                            _ => false,
-                        },
-                        target: marker,
-                    });
-                    continue;
-                }
-                Operation::StackValue => {
-                    need_deref = false;
-
-                    // Find extra stack_value, that follow wasm-local operators,
-                    // and mark such locals with special flag.
-                    if let (Some(CompiledExpressionPart::Local { trailing, .. }), true) =
-                        (parts.last_mut(), code_chunk.is_empty())
-                    {
-                        *trailing = true;
-                        continue;
-                    }
-                }
-                Operation::Deref { .. } => {
-                    flush_code_chunk!();
-                    push!(CompiledExpressionPart::Deref);
-                    // Don't re-enter the loop here (i.e. continue), because the
-                    // DW_OP_deref still needs to be kept.
-                }
-                Operation::Address { .. }
-                | Operation::AddressIndex { .. }
-                | Operation::Call { .. }
-                | Operation::Register { .. }
-                | Operation::RegisterOffset { .. }
-                | Operation::CallFrameCFA
-                | Operation::PushObjectAddress
-                | Operation::TLS
-                | Operation::ImplicitValue { .. }
-                | Operation::ImplicitPointer { .. }
-                | Operation::EntryValue { .. }
-                | Operation::ParameterRef { .. } => {
-                    return Ok(None);
-                }
+            Operation::WasmGlobal { index: _ } | Operation::WasmStack { index: _ } => {
+                // TODO support those two
+                return Ok(None);
             }
-            let chunk = &buf[pos..pc.offset_from(&expr.0).into_u64() as usize];
-            code_chunk.extend_from_slice(chunk);
         }
+        let chunk = &buf[pos..pc.offset_from(&expr.0).into_u64() as usize];
+        code_chunk.extend_from_slice(chunk);
     }
 
     flush_code_chunk!();
@@ -637,7 +695,7 @@ struct CachedValueLabelRange {
     func_index: DefinedFuncIndex,
     start: usize,
     end: usize,
-    label_location: HashMap<ValueLabel, ValueLoc>,
+    label_location: HashMap<ValueLabel, LabelValueLoc>,
 }
 
 struct ValueLabelRangesBuilder<'a, 'b> {
@@ -940,6 +998,31 @@ mod tests {
         );
 
         let e = expression!(
+            DW_OP_WASM_location,
+            0x0,
+            1,
+            DW_OP_lit16,
+            DW_OP_shra,
+            DW_OP_stack_value
+        );
+        let ce = compile_expression(&e, DWARF_ENCODING, None)
+            .expect("non-error")
+            .expect("expression");
+        assert_eq!(
+            ce,
+            CompiledExpression {
+                parts: vec![
+                    CompiledExpressionPart::Local {
+                        label: val1,
+                        trailing: false
+                    },
+                    CompiledExpressionPart::Code(vec![64, 35, 32, 22, 8, 32, 36, 22, 38, 159])
+                ],
+                need_deref: false,
+            }
+        );
+
+        let e = expression!(
             DW_OP_lit1,
             DW_OP_dup,
             DW_OP_WASM_location,
@@ -979,7 +1062,7 @@ mod tests {
                         conditionally: true,
                         target: targets[0].clone(),
                     },
-                    CompiledExpressionPart::Code(vec![22, 37]),
+                    CompiledExpressionPart::Code(vec![22, 35, 32, 22, 8, 32, 36, 22, 37]),
                     CompiledExpressionPart::Jump {
                         conditionally: false,
                         target: targets[1].clone(),
@@ -1104,14 +1187,21 @@ mod tests {
                     InstructionAddressMap {
                         srcloc: SourceLoc::new(code_section_offset + 12),
                         code_offset: 5,
-                        code_len: 3,
+                    },
+                    InstructionAddressMap {
+                        srcloc: SourceLoc::default(),
+                        code_offset: 8,
                     },
                     InstructionAddressMap {
                         srcloc: SourceLoc::new(code_section_offset + 17),
                         code_offset: 15,
-                        code_len: 8,
                     },
-                ],
+                    InstructionAddressMap {
+                        srcloc: SourceLoc::default(),
+                        code_offset: 23,
+                    },
+                ]
+                .into(),
                 start_srcloc: SourceLoc::new(code_section_offset + 10),
                 end_srcloc: SourceLoc::new(code_section_offset + 20),
                 body_offset: 0,
@@ -1131,7 +1221,7 @@ mod tests {
     fn create_mock_value_ranges() -> (ValueLabelsRanges, (ValueLabel, ValueLabel, ValueLabel)) {
         use std::collections::HashMap;
         use wasmtime_environ::entity::EntityRef;
-        use wasmtime_environ::ir::{ValueLoc, ValueLocRange};
+        use wasmtime_environ::ir::{LabelValueLoc, ValueLoc, ValueLocRange};
         let mut value_ranges = HashMap::new();
         let value_0 = ValueLabel::new(0);
         let value_1 = ValueLabel::new(1);
@@ -1139,7 +1229,7 @@ mod tests {
         value_ranges.insert(
             value_0,
             vec![ValueLocRange {
-                loc: ValueLoc::Unassigned,
+                loc: LabelValueLoc::ValueLoc(ValueLoc::Unassigned),
                 start: 0,
                 end: 25,
             }],
@@ -1147,7 +1237,7 @@ mod tests {
         value_ranges.insert(
             value_1,
             vec![ValueLocRange {
-                loc: ValueLoc::Unassigned,
+                loc: LabelValueLoc::ValueLoc(ValueLoc::Unassigned),
                 start: 5,
                 end: 30,
             }],
@@ -1156,12 +1246,12 @@ mod tests {
             value_2,
             vec![
                 ValueLocRange {
-                    loc: ValueLoc::Unassigned,
+                    loc: LabelValueLoc::ValueLoc(ValueLoc::Unassigned),
                     start: 0,
                     end: 10,
                 },
                 ValueLocRange {
-                    loc: ValueLoc::Unassigned,
+                    loc: LabelValueLoc::ValueLoc(ValueLoc::Unassigned),
                     start: 20,
                     end: 30,
                 },

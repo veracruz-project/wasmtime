@@ -9,17 +9,14 @@ use wasmtime::*;
 fn main() -> Result<()> {
     // Enable interruptable code via `Config` and then create an interrupt
     // handle which we'll use later to interrupt running code.
-    let engine = Engine::new(Config::new().interruptable(true));
+    let engine = Engine::new(Config::new().interruptable(true))?;
     let store = Store::new(&engine);
     let interrupt_handle = store.interrupt_handle()?;
 
     // Compile and instantiate a small example with an infinite loop.
     let module = Module::from_file(&engine, "examples/interrupt.wat")?;
     let instance = Instance::new(&store, &module, &[])?;
-    let run = instance
-        .get_func("run")
-        .ok_or(anyhow::format_err!("failed to find `run` function export"))?
-        .get0::<()>()?;
+    let run = instance.get_typed_func::<(), ()>("run")?;
 
     // Spin up a thread to send us an interrupt in a second
     std::thread::spawn(move || {
@@ -29,7 +26,7 @@ fn main() -> Result<()> {
     });
 
     println!("Entering infinite loop ...");
-    let trap = run().unwrap_err();
+    let trap = run.call(()).unwrap_err();
 
     println!("trap received...");
     assert!(trap.to_string().contains("wasm trap: interrupt"));

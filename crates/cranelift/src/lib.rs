@@ -90,16 +90,18 @@
 
 use crate::func_environ::{get_func_name, FuncEnvironment};
 use cranelift_codegen::ir::{self, ExternalName};
+use cranelift_codegen::isa::{CallConv, TargetIsa};
 use cranelift_codegen::machinst::buffer::MachSrcLoc;
 use cranelift_codegen::print_errors::pretty_error;
 use cranelift_codegen::{binemit, isa, Context};
-use cranelift_wasm::{DefinedFuncIndex, FuncIndex, FuncTranslator};
+use cranelift_wasm::{DefinedFuncIndex, FuncIndex, FuncTranslator, SignatureIndex, WasmType};
 use std::convert::TryFrom;
 use std::sync::Mutex;
+use target_lexicon::CallingConvention;
 use wasmtime_environ::{
     CompileError, CompiledFunction, Compiler, FunctionAddressMap, FunctionBodyData,
-    InstructionAddressMap, ModuleTranslation, Relocation, RelocationTarget, StackMapInformation,
-    TrapInformation,
+    InstructionAddressMap, Module, ModuleTranslation, Relocation, RelocationTarget,
+    StackMapInformation, TrapInformation, Tunables, TypeTables,
 };
 
 mod func_environ;
@@ -114,15 +116,6 @@ struct RelocSink {
 }
 
 impl binemit::RelocSink for RelocSink {
-    fn reloc_block(
-        &mut self,
-        _offset: binemit::CodeOffset,
-        _reloc: binemit::Reloc,
-        _block_offset: binemit::CodeOffset,
-    ) {
-        // This should use the `offsets` field of `ir::Function`.
-        panic!("block headers not yet implemented");
-    }
     fn reloc_external(
         &mut self,
         offset: binemit::CodeOffset,
@@ -195,12 +188,11 @@ impl binemit::TrapSink for TrapSink {
     fn trap(
         &mut self,
         code_offset: binemit::CodeOffset,
-        source_loc: ir::SourceLoc,
+        _source_loc: ir::SourceLoc,
         trap_code: ir::TrapCode,
     ) {
         self.traps.push(TrapInformation {
             code_offset,
-            source_loc,
             trap_code,
         });
     }
@@ -230,21 +222,28 @@ impl StackMapSink {
 fn get_function_address_map<'data>(
     context: &Context,
     data: &FunctionBodyData<'data>,
-    body_len: usize,
+    body_len: u32,
     isa: &dyn isa::TargetIsa,
 ) -> FunctionAddressMap {
-    let mut instructions = Vec::new();
+    // Generate artificial srcloc for function start/end to identify boundary
+    // within module.
+    let data = data.body.get_binary_reader();
+    let offset = data.original_position();
+    let len = data.bytes_remaining();
+    assert!((offset + len) <= u32::max_value() as usize);
+    let start_srcloc = ir::SourceLoc::new(offset as u32);
+    let end_srcloc = ir::SourceLoc::new((offset + len) as u32);
 
-    if let Some(ref mcr) = &context.mach_compile_result {
+    let instructions = if let Some(ref mcr) = &context.mach_compile_result {
         // New-style backend: we have a `MachCompileResult` that will give us `MachSrcLoc` mapping
         // tuples.
-        for &MachSrcLoc { start, end, loc } in mcr.buffer.get_srclocs_sorted() {
-            instructions.push(InstructionAddressMap {
-                srcloc: loc,
-                code_offset: start as usize,
-                code_len: (end - start) as usize,
-            });
-        }
+        collect_address_maps(
+            body_len,
+            mcr.buffer
+                .get_srclocs_sorted()
+                .into_iter()
+                .map(|&MachSrcLoc { start, end, loc }| (loc, start, (end - start))),
+        )
     } else {
         // Old-style backend: we need to traverse the instruction/encoding info in the function.
         let func = &context.func;
@@ -252,31 +251,77 @@ fn get_function_address_map<'data>(
         blocks.sort_by_key(|block| func.offsets[*block]); // Ensure inst offsets always increase
 
         let encinfo = isa.encoding_info();
-        for block in blocks {
-            for (offset, inst, size) in func.inst_offsets(block, &encinfo) {
-                let srcloc = func.srclocs[inst];
-                instructions.push(InstructionAddressMap {
-                    srcloc,
-                    code_offset: offset as usize,
-                    code_len: size as usize,
-                });
-            }
-        }
-    }
-
-    // Generate artificial srcloc for function start/end to identify boundary
-    // within module. Similar to FuncTranslator::cur_srcloc(): it will wrap around
-    // if byte code is larger than 4 GB.
-    let start_srcloc = ir::SourceLoc::new(data.module_offset as u32);
-    let end_srcloc = ir::SourceLoc::new((data.module_offset + data.data.len()) as u32);
+        collect_address_maps(
+            body_len,
+            blocks
+                .into_iter()
+                .flat_map(|block| func.inst_offsets(block, &encinfo))
+                .map(|(offset, inst, size)| (func.srclocs[inst], offset, size)),
+        )
+    };
 
     FunctionAddressMap {
-        instructions,
+        instructions: instructions.into(),
         start_srcloc,
         end_srcloc,
         body_offset: 0,
         body_len,
     }
+}
+
+// Collects an iterator of `InstructionAddressMap` into a `Vec` for insertion
+// into a `FunctionAddressMap`. This will automatically coalesce adjacent
+// instructions which map to the same original source position.
+fn collect_address_maps(
+    code_size: u32,
+    iter: impl IntoIterator<Item = (ir::SourceLoc, u32, u32)>,
+) -> Vec<InstructionAddressMap> {
+    let mut iter = iter.into_iter();
+    let (mut cur_loc, mut cur_offset, mut cur_len) = match iter.next() {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let mut ret = Vec::new();
+    for (loc, offset, len) in iter {
+        // If this instruction is adjacent to the previous and has the same
+        // source location then we can "coalesce" it with the current
+        // instruction.
+        if cur_offset + cur_len == offset && loc == cur_loc {
+            cur_len += len;
+            continue;
+        }
+
+        // Push an entry for the previous source item.
+        ret.push(InstructionAddressMap {
+            srcloc: cur_loc,
+            code_offset: cur_offset,
+        });
+        // And push a "dummy" entry if necessary to cover the span of ranges,
+        // if any, between the previous source offset and this one.
+        if cur_offset + cur_len != offset {
+            ret.push(InstructionAddressMap {
+                srcloc: ir::SourceLoc::default(),
+                code_offset: cur_offset + cur_len,
+            });
+        }
+        // Update our current location to get extended later or pushed on at
+        // the end.
+        cur_loc = loc;
+        cur_offset = offset;
+        cur_len = len;
+    }
+    ret.push(InstructionAddressMap {
+        srcloc: cur_loc,
+        code_offset: cur_offset,
+    });
+    if cur_offset + cur_len != code_size {
+        ret.push(InstructionAddressMap {
+            srcloc: ir::SourceLoc::default(),
+            code_offset: cur_offset + cur_len,
+        });
+    }
+
+    return ret;
 }
 
 /// A compiler that compiles a WebAssembly module with Cranelift, translating the Wasm to Cranelift IR,
@@ -302,20 +347,21 @@ impl Compiler for Cranelift {
         &self,
         translation: &ModuleTranslation<'_>,
         func_index: DefinedFuncIndex,
-        input: &FunctionBodyData<'_>,
+        mut input: FunctionBodyData<'_>,
         isa: &dyn isa::TargetIsa,
+        tunables: &Tunables,
+        types: &TypeTables,
     ) -> Result<CompiledFunction, CompileError> {
         let module = &translation.module;
-        let tunables = &translation.tunables;
         let func_index = module.func_index(func_index);
         let mut context = Context::new();
         context.func.name = get_func_name(func_index);
-        context.func.signature = module.native_func_signature(func_index).clone();
-        if tunables.debug_info {
+        context.func.signature = func_signature(isa, module, types, func_index);
+        if tunables.generate_native_debuginfo {
             context.func.collect_debug_info();
         }
 
-        let mut func_env = FuncEnvironment::new(isa.frontend_config(), module, tunables);
+        let mut func_env = FuncEnvironment::new(isa, module, types, tunables);
 
         // We use these as constant offsets below in
         // `stack_limit_from_arguments`, so assert their values here. This
@@ -351,14 +397,15 @@ impl Compiler for Cranelift {
         });
         context.func.stack_limit = Some(stack_limit);
         let mut func_translator = self.take_translator();
-        let result = func_translator.translate(
-            translation.module_translation.as_ref().unwrap(),
-            input.data,
-            input.module_offset,
+        let result = func_translator.translate_body(
+            &mut input.validator,
+            input.body.clone(),
             &mut context.func,
             &mut func_env,
         );
-        self.save_translator(func_translator);
+        if result.is_ok() {
+            self.save_translator(func_translator);
+        }
         result?;
 
         let mut code_buf: Vec<u8> = Vec::new();
@@ -381,9 +428,10 @@ impl Compiler for Cranelift {
             CompileError::Codegen(pretty_error(&context.func, Some(isa), error))
         })?;
 
-        let address_transform = get_function_address_map(&context, input, code_buf.len(), isa);
+        let address_transform =
+            get_function_address_map(&context, &input, code_buf.len() as u32, isa);
 
-        let ranges = if tunables.debug_info {
+        let ranges = if tunables.generate_native_debuginfo {
             let ranges = context.build_value_labels_ranges(isa).map_err(|error| {
                 CompileError::Codegen(pretty_error(&context.func, Some(isa), error))
             })?;
@@ -404,4 +452,84 @@ impl Compiler for Cranelift {
             stack_maps: stack_map_sink.finish(),
         })
     }
+}
+
+pub fn blank_sig(isa: &dyn TargetIsa, call_conv: CallConv) -> ir::Signature {
+    let pointer_type = isa.pointer_type();
+    let mut sig = ir::Signature::new(call_conv);
+    // Add the caller/callee `vmctx` parameters.
+    sig.params.push(ir::AbiParam::special(
+        pointer_type,
+        ir::ArgumentPurpose::VMContext,
+    ));
+    sig.params.push(ir::AbiParam::new(pointer_type));
+    return sig;
+}
+
+pub fn wasmtime_call_conv(isa: &dyn TargetIsa) -> CallConv {
+    match isa.triple().default_calling_convention() {
+        Ok(CallingConvention::SystemV) | Ok(CallingConvention::AppleAarch64) | Err(()) => {
+            CallConv::WasmtimeSystemV
+        }
+        Ok(CallingConvention::WindowsFastcall) => CallConv::WasmtimeFastcall,
+        Ok(unimp) => unimplemented!("calling convention: {:?}", unimp),
+    }
+}
+
+pub fn push_types(
+    isa: &dyn TargetIsa,
+    sig: &mut ir::Signature,
+    types: &TypeTables,
+    index: SignatureIndex,
+) {
+    let wasm = &types.wasm_signatures[index];
+
+    let cvt = |ty: &WasmType| {
+        ir::AbiParam::new(match ty {
+            WasmType::I32 => ir::types::I32,
+            WasmType::I64 => ir::types::I64,
+            WasmType::F32 => ir::types::F32,
+            WasmType::F64 => ir::types::F64,
+            WasmType::V128 => ir::types::I8X16,
+            WasmType::FuncRef | WasmType::ExternRef => {
+                wasmtime_environ::reference_type(*ty, isa.pointer_type())
+            }
+            WasmType::ExnRef => unimplemented!(),
+        })
+    };
+    sig.params.extend(wasm.params.iter().map(&cvt));
+    sig.returns.extend(wasm.returns.iter().map(&cvt));
+}
+
+pub fn indirect_signature(
+    isa: &dyn TargetIsa,
+    types: &TypeTables,
+    index: SignatureIndex,
+) -> ir::Signature {
+    let mut sig = blank_sig(isa, wasmtime_call_conv(isa));
+    push_types(isa, &mut sig, types, index);
+    return sig;
+}
+
+pub fn func_signature(
+    isa: &dyn TargetIsa,
+    module: &Module,
+    types: &TypeTables,
+    index: FuncIndex,
+) -> ir::Signature {
+    let call_conv = match module.defined_func_index(index) {
+        // If this is a defined function in the module and it's never possibly
+        // exported, then we can optimize this function to use the fastest
+        // calling convention since it's purely an internal implementation
+        // detail of the module itself.
+        Some(idx) if !module.possibly_exported_funcs.contains(&idx) => CallConv::Fast,
+
+        // ... otherwise if it's an imported function or if it's a possibly
+        // exported function then we use the default ABI wasmtime would
+        // otherwise select.
+        _ => wasmtime_call_conv(isa),
+    };
+    let mut sig = blank_sig(isa, call_conv);
+    push_types(isa, &mut sig, types, module.functions[index]);
+    return sig;
 }

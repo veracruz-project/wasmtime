@@ -15,31 +15,28 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::option_map_unwrap_or,
-        clippy::option_map_unwrap_or_else,
-        clippy::unicode_not_nfc,
+        clippy::map_unwrap_or,
+        clippy::clippy::unicode_not_nfc,
         clippy::use_self
     )
 )]
 
 use clap::{App, Arg, SubCommand};
+use cranelift_codegen::ir::Function;
 use cranelift_reader::parse_functions;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::{self, Write};
 use std::process;
 
-mod serde_clif_json;
-
 fn call_ser(file: &str, pretty: bool) -> Result<(), String> {
     let ret_of_parse = parse_functions(file);
     match ret_of_parse {
         Ok(funcs) => {
-            let ser_funcs = serde_clif_json::SerObj::new(&funcs);
             let ser_str = if pretty {
-                serde_json::to_string_pretty(&ser_funcs).unwrap()
+                serde_json::to_string_pretty(&funcs).unwrap()
             } else {
-                serde_json::to_string(&ser_funcs).unwrap()
+                serde_json::to_string(&funcs).unwrap()
             };
             println!("{}", ser_str);
             Ok(())
@@ -49,7 +46,7 @@ fn call_ser(file: &str, pretty: bool) -> Result<(), String> {
 }
 
 fn call_de(file: &File) -> Result<(), String> {
-    let de: serde_clif_json::SerObj = match serde_json::from_reader(file) {
+    let de: Vec<Function> = match serde_json::from_reader(file) {
         Result::Ok(val) => val,
         Result::Err(err) => panic!("{}", err),
     };

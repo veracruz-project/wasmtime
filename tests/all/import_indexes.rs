@@ -20,7 +20,7 @@ fn same_import_names_still_distinct() -> anyhow::Result<()> {
     let imports = [
         Func::new(
             &store,
-            FuncType::new(Box::new([]), Box::new([ValType::I32])),
+            FuncType::new(None, Some(ValType::I32)),
             |_, params, results| {
                 assert!(params.is_empty());
                 assert_eq!(results.len(), 1);
@@ -31,7 +31,7 @@ fn same_import_names_still_distinct() -> anyhow::Result<()> {
         .into(),
         Func::new(
             &store,
-            FuncType::new(Box::new([]), Box::new([ValType::F32])),
+            FuncType::new(None, Some(ValType::F32)),
             |_, params, results| {
                 assert!(params.is_empty());
                 assert_eq!(results.len(), 1);
@@ -43,12 +43,8 @@ fn same_import_names_still_distinct() -> anyhow::Result<()> {
     ];
     let instance = Instance::new(&store, &module, &imports)?;
 
-    let func = instance.get_func("foo").unwrap();
-    let results = func.call(&[])?;
-    assert_eq!(results.len(), 1);
-    match results[0] {
-        Val::I32(n) => assert_eq!(n, 3),
-        _ => panic!("unexpected type of return"),
-    }
+    let func = instance.get_typed_func::<(), i32>("foo")?;
+    let result = func.call(())?;
+    assert_eq!(result, 3);
     Ok(())
 }

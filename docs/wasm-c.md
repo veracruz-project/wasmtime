@@ -12,4 +12,17 @@ that provide builds of Clang and sysroot libraries.
 WASI doesn't yet support `setjmp`/`longjmp` or C++ exceptions, as it is
 waiting for [unwinding support in WebAssembly].
 
+By default, the C/C++ toolchain orders linear memory to put the globals first,
+the stack second, and start the heap after that. This reduces code size,
+because references to globals can use small offsets. However, it also means
+that stack overflow will often lead to corrupted globals. The
+`-Wl,--stack-first` flag to clang instructs it to put the stack first, followed
+by the globals and the heap, which may produce slightly larger code, but will
+more reliably trap on stack overflow.
+
+See the [wasm-ld documentation] for more information and additional flags. Note
+flags related to dynamic linking, such `-shared` and `--export-dynamic` are
+not yet stable and are expected to change behavior in the future.
+
 [unwinding support in WebAssembly]: https://github.com/WebAssembly/exception-handling/
+[wasm-ld documentation]: https://lld.llvm.org/WebAssembly.html
