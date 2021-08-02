@@ -116,9 +116,6 @@ pub fn generate(
             isa::Isa::Arm64 => {
                 // aarch64 doesn't have platform-specific settings.
             }
-            isa::Isa::S390x => {
-                // s390x doesn't have platform-specific settings.
-            }
             isa::Isa::Arm32 | isa::Isa::Riscv => todo!(),
         }
     }

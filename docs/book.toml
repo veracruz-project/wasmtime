@@ -3,6 +3,3 @@ authors = ["The Wasmtime Project Developers"]
 multilingual = false
 src = "."
 title = "Wasmtime"
-
-[output.html]
-cname = "docs.wasmtime.dev"

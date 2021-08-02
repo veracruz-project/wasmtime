@@ -80,7 +80,6 @@ fn to_object_relocations<'a>(
                 RelocationEncoding::Generic,
                 32,
             ),
-            Reloc::S390xPCRel32Dbl => (RelocationKind::Relative, RelocationEncoding::S390xDbl, 32),
             other => unimplemented!("Unimplemented relocation {:?}", other),
         };
         Some(ObjectRelocation {
@@ -103,7 +102,6 @@ fn to_object_architecture(
         X86_64 => Architecture::X86_64,
         Arm(_) => Architecture::Arm,
         Aarch64(_) => Architecture::Aarch64,
-        S390x => Architecture::S390x,
         architecture => {
             anyhow::bail!("target architecture {:?} is unsupported", architecture,);
         }
@@ -124,6 +122,10 @@ fn process_unwind_info(info: &UnwindInfo, obj: &mut Object, code_section: Sectio
 
 /// Builds ELF image from the module `Compilation`.
 // const CODE_SECTION_ALIGNMENT: u64 = 0x1000;
+// assert_eq!(
+//     isa.triple().architecture.endianness(),
+//     Ok(target_lexicon::Endianness::Little)
+// );
 
 /// Iterates through all `LibCall` members and all runtime exported functions.
 #[macro_export]
@@ -221,10 +223,7 @@ impl ObjectBuilderTarget {
         Ok(Self {
             binary_format: BinaryFormat::Elf,
             architecture: to_object_architecture(arch)?,
-            endianness: match arch.endianness().unwrap() {
-                target_lexicon::Endianness::Little => object::Endianness::Little,
-                target_lexicon::Endianness::Big => object::Endianness::Big,
-            },
+            endianness: Endianness::Little,
         })
     }
 
@@ -259,7 +258,7 @@ pub struct ObjectBuilder<'a> {
     module: &'a Module,
     code_alignment: u64,
     compilation: &'a CompiledFunctions,
-    trampolines: Vec<(SignatureIndex, CompiledFunction)>,
+    trampolines: PrimaryMap<SignatureIndex, CompiledFunction>,
     dwarf_sections: Vec<DwarfSection>,
 }
 
@@ -273,7 +272,7 @@ impl<'a> ObjectBuilder<'a> {
             target,
             module,
             code_alignment: 1,
-            trampolines: Vec::new(),
+            trampolines: PrimaryMap::new(),
             dwarf_sections: vec![],
             compilation,
         }
@@ -286,7 +285,7 @@ impl<'a> ObjectBuilder<'a> {
 
     pub fn set_trampolines(
         &mut self,
-        trampolines: Vec<(SignatureIndex, CompiledFunction)>,
+        trampolines: PrimaryMap<SignatureIndex, CompiledFunction>,
     ) -> &mut Self {
         self.trampolines = trampolines;
         self
@@ -361,7 +360,7 @@ impl<'a> ObjectBuilder<'a> {
         }
         let mut trampolines = Vec::new();
         for (i, func) in self.trampolines.iter() {
-            let name = utils::trampoline_symbol_name(*i).as_bytes().to_vec();
+            let name = utils::trampoline_symbol_name(i).as_bytes().to_vec();
             trampolines.push(append_func(name, func));
         }
 
@@ -401,7 +400,7 @@ impl<'a> ObjectBuilder<'a> {
             }
         }
 
-        for ((_, func), symbol) in self.trampolines.iter().zip(trampolines) {
+        for (func, symbol) in self.trampolines.values().zip(trampolines) {
             let (_, off) = obj.symbol_section_and_offset(symbol).unwrap();
             for r in to_object_relocations(
                 func.relocations.iter(),

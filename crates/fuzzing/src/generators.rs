@@ -8,11 +8,54 @@
 //! wrapper over an external tool, such that the wrapper implements the
 //! `Arbitrary` trait for the wrapped external tool.
 
+#[cfg(feature = "binaryen")]
 pub mod api;
 
 pub mod table_ops;
 
 use arbitrary::{Arbitrary, Unstructured};
+
+/// A Wasm test case generator that is powered by Binaryen's `wasm-opt -ttf`.
+#[derive(Clone)]
+#[cfg(feature = "binaryen")]
+pub struct WasmOptTtf {
+    /// The raw, encoded Wasm bytes.
+    pub wasm: Vec<u8>,
+}
+
+#[cfg(feature = "binaryen")]
+impl std::fmt::Debug for WasmOptTtf {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "WasmOptTtf {{ wasm: wat::parse_str(r###\"\n{}\n\"###).unwrap() }}",
+            wasmprinter::print_bytes(&self.wasm).expect("valid wasm should always disassemble")
+        )
+    }
+}
+
+#[cfg(feature = "binaryen")]
+impl Arbitrary for WasmOptTtf {
+    fn arbitrary(input: &mut arbitrary::Unstructured) -> arbitrary::Result<Self> {
+        crate::init_fuzzing();
+        let seed: Vec<u8> = Arbitrary::arbitrary(input)?;
+        let module = binaryen::tools::translate_to_fuzz_mvp(&seed);
+        let wasm = module.write();
+        Ok(WasmOptTtf { wasm })
+    }
+
+    fn arbitrary_take_rest(input: arbitrary::Unstructured) -> arbitrary::Result<Self> {
+        crate::init_fuzzing();
+        let seed: Vec<u8> = Arbitrary::arbitrary_take_rest(input)?;
+        let module = binaryen::tools::translate_to_fuzz_mvp(&seed);
+        let wasm = module.write();
+        Ok(WasmOptTtf { wasm })
+    }
+
+    fn size_hint(depth: usize) -> (usize, Option<usize>) {
+        <Vec<u8> as Arbitrary>::size_hint(depth)
+    }
+}
 
 /// A description of configuration options that we should do differential
 /// testing between.
@@ -64,8 +107,6 @@ pub struct Config {
     debug_info: bool,
     canonicalize_nans: bool,
     interruptable: bool,
-    #[allow(missing_docs)]
-    pub consume_fuel: bool,
 
     // Note that we use 32-bit values here to avoid blowing the 64-bit address
     // space by requesting ungodly-large sizes/guards.
@@ -77,15 +118,14 @@ pub struct Config {
 impl Config {
     /// Converts this to a `wasmtime::Config` object
     pub fn to_wasmtime(&self) -> wasmtime::Config {
-        let mut cfg = crate::fuzz_default_config(wasmtime::Strategy::Auto).unwrap();
+        let mut cfg = wasmtime::Config::new();
         cfg.debug_info(self.debug_info)
             .static_memory_maximum_size(self.static_memory_maximum_size.unwrap_or(0).into())
             .static_memory_guard_size(self.static_memory_guard_size.unwrap_or(0).into())
             .dynamic_memory_guard_size(self.dynamic_memory_guard_size.unwrap_or(0).into())
             .cranelift_nan_canonicalization(self.canonicalize_nans)
             .cranelift_opt_level(self.opt_level.to_wasmtime())
-            .interruptable(self.interruptable)
-            .consume_fuel(self.consume_fuel);
+            .interruptable(self.interruptable);
         return cfg;
     }
 }
@@ -102,8 +142,8 @@ pub struct SpecTest {
     pub contents: &'static str,
 }
 
-impl<'a> Arbitrary<'a> for SpecTest {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+impl Arbitrary for SpecTest {
+    fn arbitrary(u: &mut Unstructured) -> arbitrary::Result<Self> {
         // NB: this does get a uniform value in the provided range.
         let i = u.int_in_range(0..=FILES.len() - 1)?;
         let (file, contents) = FILES[i];

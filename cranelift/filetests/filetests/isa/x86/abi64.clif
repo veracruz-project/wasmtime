@@ -1,6 +1,6 @@
 ; Test the legalization of function signatures.
 test legalizer
-target x86_64 legacy
+target x86_64
 
 ; regex: V=v\d+
 

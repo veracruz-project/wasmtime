@@ -21,7 +21,7 @@ use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use structopt::StructOpt;
-use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+use term;
 
 /// For verbose printing: only print if the `$x` expression is true.
 macro_rules! vprintln {
@@ -36,11 +36,11 @@ macro_rules! vcprintln {
     ($x: expr, $use_color: expr, $term: ident, $color: expr, $($tts:tt)*) => {
         if $x {
             if $use_color {
-                $term.set_color(ColorSpec::new().set_fg(Some($color)))?;
+                let _ = $term.fg($color);
             }
             println!($($tts)*);
             if $use_color {
-                $term.reset()?;
+                let _ = $term.reset();
             }
         }
     };
@@ -50,11 +50,11 @@ macro_rules! vcprint {
     ($x: expr, $use_color: expr, $term: ident, $color: expr, $($tts:tt)*) => {
         if $x {
             if $use_color {
-                $term.set_color(ColorSpec::new().set_fg(Some($color)))?;
+                let _ = $term.fg($color);
             }
             print!($($tts)*);
             if $use_color {
-                $term.reset()?;
+                let _ = $term.reset();
             }
         }
     };
@@ -113,25 +113,25 @@ pub struct Options {
 
     /// Use colors in output? [options: auto/never/always; default: auto]
     #[structopt(long("color"), default_value("auto"))]
-    color: ColorOpt,
+    color: Color,
 }
 
 #[derive(PartialEq, Eq)]
-enum ColorOpt {
+enum Color {
     Auto,
     Never,
     Always,
 }
 
-impl std::str::FromStr for ColorOpt {
+impl std::str::FromStr for Color {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.to_lowercase();
         match s.as_str() {
-            "auto" => Ok(ColorOpt::Auto),
-            "never" => Ok(ColorOpt::Never),
-            "always" => Ok(ColorOpt::Always),
+            "auto" => Ok(Color::Auto),
+            "never" => Ok(Color::Never),
+            "always" => Ok(Color::Always),
             _ => Err(format!("expected auto/never/always, found: {}", s)),
         }
     }
@@ -149,19 +149,14 @@ pub fn run(options: &Options) -> Result<()> {
 }
 
 fn handle_module(options: &Options, path: &Path, name: &str, fisa: FlagsOrIsa) -> Result<()> {
-    let color_choice = match options.color {
-        ColorOpt::Auto => ColorChoice::Auto,
-        ColorOpt::Always => ColorChoice::Always,
-        ColorOpt::Never => ColorChoice::Never,
-    };
-    let mut terminal = StandardStream::stdout(color_choice);
-    let use_color = terminal.supports_color() && options.color == ColorOpt::Auto
-        || options.color == ColorOpt::Always;
+    let mut terminal = term::stdout().unwrap();
+    let use_color =
+        terminal.supports_color() && options.color == Color::Auto || options.color == Color::Always;
     vcprint!(
         options.verbose,
         use_color,
         terminal,
-        Color::Yellow,
+        term::color::YELLOW,
         "Handling: "
     );
     vprintln!(options.verbose, "\"{}\"", name);
@@ -169,7 +164,7 @@ fn handle_module(options: &Options, path: &Path, name: &str, fisa: FlagsOrIsa) -
         options.verbose,
         use_color,
         terminal,
-        Color::Magenta,
+        term::color::MAGENTA,
         "Translating... "
     );
 
@@ -197,7 +192,13 @@ fn handle_module(options: &Options, path: &Path, name: &str, fisa: FlagsOrIsa) -
         DummyEnvironment::new(isa.frontend_config(), ReturnMode::NormalReturns, debug_info);
     translate_module(&module_binary, &mut dummy_environ)?;
 
-    vcprintln!(options.verbose, use_color, terminal, Color::Green, "ok");
+    vcprintln!(
+        options.verbose,
+        use_color,
+        terminal,
+        term::color::GREEN,
+        "ok"
+    );
 
     if options.just_decode {
         if !options.print {
@@ -232,7 +233,7 @@ fn handle_module(options: &Options, path: &Path, name: &str, fisa: FlagsOrIsa) -
             options.verbose,
             use_color,
             terminal,
-            Color::Magenta,
+            term::color::MAGENTA,
             "Checking... "
         );
     } else {
@@ -240,7 +241,7 @@ fn handle_module(options: &Options, path: &Path, name: &str, fisa: FlagsOrIsa) -
             options.verbose,
             use_color,
             terminal,
-            Color::Magenta,
+            term::color::MAGENTA,
             "Compiling... "
         );
     }
@@ -350,6 +351,12 @@ fn handle_module(options: &Options, path: &Path, name: &str, fisa: FlagsOrIsa) -
         println!("{}", timing::take_current());
     }
 
-    vcprintln!(options.verbose, use_color, terminal, Color::Green, "ok");
+    vcprintln!(
+        options.verbose,
+        use_color,
+        terminal,
+        term::color::GREEN,
+        "ok"
+    );
     Ok(())
 }

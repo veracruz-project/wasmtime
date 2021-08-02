@@ -12,18 +12,12 @@ cargo-fuzz = true
 cranelift-codegen = { path = "../cranelift/codegen" }
 cranelift-reader = { path = "../cranelift/reader" }
 cranelift-wasm = { path = "../cranelift/wasm" }
-libfuzzer-sys = "0.4.0"
-target-lexicon = "0.12"
+libfuzzer-sys = "0.3.3"
+target-lexicon = "0.11"
 peepmatic-fuzzing = { path = "../cranelift/peepmatic/crates/fuzzing", optional = true }
 wasmtime = { path = "../crates/wasmtime" }
 wasmtime-fuzzing = { path = "../crates/fuzzing" }
-wasm-smith = "0.4.0"
-
-[features]
-# Leave a stub feature with no side-effects in place for now: the OSS-Fuzz
-# config builds fuzz targets with this feature enabled and we don't want to
-# break the build.
-experimental_x64 = []
+wasm-smith = "0.1.5"
 
 [[bin]]
 name = "compile"
@@ -38,22 +32,25 @@ test = false
 doc = false
 
 [[bin]]
+name = "instantiate_translated"
+path = "fuzz_targets/instantiate_translated.rs"
+test = false
+doc = false
+required-features = ["binaryen"]
+
+[[bin]]
 name = "api_calls"
 path = "fuzz_targets/api_calls.rs"
 test = false
 doc = false
+required-features = ["binaryen"]
 
 [[bin]]
 name = "differential"
 path = "fuzz_targets/differential.rs"
 test = false
 doc = false
-
-[[bin]]
-name = "differential_wasmi"
-path = "fuzz_targets/differential_wasmi.rs"
-test = false
-doc = false
+required-features = ["binaryen"]
 
 [[bin]]
 name = "spectests"
@@ -68,14 +65,46 @@ test = false
 doc = false
 
 [[bin]]
-name = "instantiate-wasm-smith"
-path = "fuzz_targets/instantiate-wasm-smith.rs"
+name = "peepmatic_simple_automata"
+path = "fuzz_targets/peepmatic_simple_automata.rs"
 test = false
 doc = false
+required-features = ["peepmatic-fuzzing"]
 
 [[bin]]
-name = "instantiate-swarm"
-path = "fuzz_targets/instantiate-swarm.rs"
+name = "peepmatic_fst_differential"
+path = "fuzz_targets/peepmatic_fst_differential.rs"
+test = false
+doc = false
+required-features = ["peepmatic-fuzzing"]
+
+[[bin]]
+name = "peepmatic_parser"
+path = "fuzz_targets/peepmatic_parser.rs"
+test = false
+doc = false
+required-features = ["peepmatic-fuzzing"]
+
+[[bin]]
+name = "peepmatic_compile"
+path = "fuzz_targets/peepmatic_compile.rs"
+test = false
+doc = false
+required-features = ["peepmatic-fuzzing"]
+
+[[bin]]
+name = "peepmatic_interp"
+path = "fuzz_targets/peepmatic_interp.rs"
+test = false
+doc = false
+required-features = ["peepmatic-fuzzing"]
+
+[features]
+binaryen = ["wasmtime-fuzzing/binaryen"]
+
+[[bin]]
+name = "instantiate-wasm-smith"
+path = "fuzz_targets/instantiate-wasm-smith.rs"
 test = false
 doc = false
 

@@ -39,20 +39,19 @@ const CRATES_TO_PUBLISH: &[&str] = &[
     "cranelift-object",
     "cranelift-interpreter",
     "cranelift",
-    "cranelift-jit",
+    "cranelift-simplejit",
     // wig/wiggle
+    "wig",
     "wiggle-generate",
     "wiggle-macro",
     "wiggle",
-    "wiggle-borrow",
     "wasmtime-wiggle-macro",
-    // wasi-common
+    // wasi-common bits
+    "winx",
+    "yanix",
     "wasi-common",
-    "wasi-cap-std-sync",
-    "wasi-tokio",
     // wasmtime
     "lightbeam",
-    "wasmtime-fiber",
     "wasmtime-environ",
     "wasmtime-runtime",
     "wasmtime-debug",
@@ -65,8 +64,6 @@ const CRATES_TO_PUBLISH: &[&str] = &[
     "wasmtime",
     "wasmtime-wiggle",
     "wasmtime-wasi",
-    "wasmtime-wasi-nn",
-    "wasmtime-wasi-crypto",
     "wasmtime-rust-macro",
     "wasmtime-rust",
     "wasmtime-wast",
@@ -178,7 +175,7 @@ fn read_crate(manifest: &Path) -> Crate {
     } else {
         version.clone()
     };
-    if ["witx", "wasi-crypto"].contains(&&name[..]) {
+    if name == "witx" {
         publish = false;
     }
     Crate {
@@ -273,17 +270,6 @@ fn publish(krate: &Crate) {
     if !status.success() {
         println!("FAIL: failed to publish `{}`: {}", krate.name, status);
     }
-
-    // Note that the status is ignored here. This fails most of the time because
-    // the owner is already set and present, so we only want to add this to
-    // crates which haven't previously been published.
-    Command::new("cargo")
-        .arg("owner")
-        .arg("-a")
-        .arg("github:bytecodealliance:wasmtime-publish")
-        .arg(&krate.name)
-        .status()
-        .expect("failed to run cargo");
 }
 
 // Verify the current tree is publish-able to crates.io. The intention here is
@@ -306,15 +292,8 @@ fn verify(crates: &[Crate]) {
 
     // Vendor witx which wasn't vendored because it's a path dependency, but
     // it'll need to be in our directory registry for crates that depend on it.
-    let witx = crates
-        .iter()
-        .find(|c| c.name == "witx" && c.manifest.iter().any(|p| p == "wasi-common"))
-        .unwrap();
+    let witx = crates.iter().find(|c| c.name == "witx").unwrap();
     verify_and_vendor(&witx);
-
-    // Vendor wasi-crypto which is also a path dependency
-    let wasi_crypto = crates.iter().find(|c| c.name == "wasi-crypto").unwrap();
-    verify_and_vendor(&wasi_crypto);
 
     for krate in crates {
         if !krate.publish {
@@ -329,14 +308,11 @@ fn verify(crates: &[Crate]) {
             .arg("--manifest-path")
             .arg(&krate.manifest)
             .env("CARGO_TARGET_DIR", "./target");
-        if krate.name.contains("lightbeam")
-            || krate.name == "witx"
-            || krate.name.contains("wasi-nn")
-        {
+        if krate.name.contains("lightbeam") || krate.name == "witx" {
             cmd.arg("--no-verify");
         }
         let status = cmd.status().unwrap();
-        assert!(status.success(), "failed to verify {:?}", &krate.manifest);
+        assert!(status.success());
         let tar = Command::new("tar")
             .arg("xf")
             .arg(format!(

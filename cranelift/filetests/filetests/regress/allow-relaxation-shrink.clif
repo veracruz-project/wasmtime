@@ -1,5 +1,5 @@
 test compile
-target x86_64 legacy
+target x86_64
 
 ; This checks that code shrink is allowed while relaxing code, when code shrink
 ; has not run.

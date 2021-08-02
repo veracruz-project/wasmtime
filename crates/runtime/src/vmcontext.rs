@@ -4,7 +4,6 @@
 use crate::externref::VMExternRef;
 use crate::instance::Instance;
 use std::any::Any;
-use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::u32;
@@ -490,20 +489,12 @@ mod test_vmshared_signature_index {
 
 impl VMSharedSignatureIndex {
     /// Create a new `VMSharedSignatureIndex`.
-    #[inline]
     pub fn new(value: u32) -> Self {
         Self(value)
-    }
-
-    /// Returns the underlying bits of the index.
-    #[inline]
-    pub fn bits(&self) -> u32 {
-        self.0
     }
 }
 
 impl Default for VMSharedSignatureIndex {
-    #[inline]
     fn default() -> Self {
         Self::new(u32::MAX)
     }
@@ -586,7 +577,10 @@ impl VMBuiltinFunctionsArray {
             wasmtime_table_grow as usize;
         ptrs[BuiltinFunctionIndex::table_init().index() as usize] = wasmtime_table_init as usize;
         ptrs[BuiltinFunctionIndex::elem_drop().index() as usize] = wasmtime_elem_drop as usize;
-        ptrs[BuiltinFunctionIndex::memory_copy().index() as usize] = wasmtime_memory_copy as usize;
+        ptrs[BuiltinFunctionIndex::defined_memory_copy().index() as usize] =
+            wasmtime_defined_memory_copy as usize;
+        ptrs[BuiltinFunctionIndex::imported_memory_copy().index() as usize] =
+            wasmtime_imported_memory_copy as usize;
         ptrs[BuiltinFunctionIndex::memory_fill().index() as usize] = wasmtime_memory_fill as usize;
         ptrs[BuiltinFunctionIndex::imported_memory_fill().index() as usize] =
             wasmtime_imported_memory_fill as usize;
@@ -604,19 +598,6 @@ impl VMBuiltinFunctionsArray {
             wasmtime_table_fill as usize;
         ptrs[BuiltinFunctionIndex::table_fill_funcref().index() as usize] =
             wasmtime_table_fill as usize;
-        ptrs[BuiltinFunctionIndex::memory_atomic_notify().index() as usize] =
-            wasmtime_memory_atomic_notify as usize;
-        ptrs[BuiltinFunctionIndex::imported_memory_atomic_notify().index() as usize] =
-            wasmtime_imported_memory_atomic_notify as usize;
-        ptrs[BuiltinFunctionIndex::memory_atomic_wait32().index() as usize] =
-            wasmtime_memory_atomic_wait32 as usize;
-        ptrs[BuiltinFunctionIndex::imported_memory_atomic_wait32().index() as usize] =
-            wasmtime_imported_memory_atomic_wait32 as usize;
-        ptrs[BuiltinFunctionIndex::memory_atomic_wait64().index() as usize] =
-            wasmtime_memory_atomic_wait64 as usize;
-        ptrs[BuiltinFunctionIndex::imported_memory_atomic_wait64().index() as usize] =
-            wasmtime_imported_memory_atomic_wait64 as usize;
-        ptrs[BuiltinFunctionIndex::out_of_gas().index() as usize] = wasmtime_out_of_gas as usize;
 
         if cfg!(debug_assertions) {
             for i in 0..ptrs.len() {
@@ -663,7 +644,8 @@ impl VMInvokeArgument {
     }
 }
 
-/// Structure used to control interrupting wasm code.
+/// Structure used to control interrupting wasm code, currently with only one
+/// atomic flag internally used.
 #[derive(Debug)]
 #[repr(C)]
 pub struct VMInterrupts {
@@ -672,14 +654,6 @@ pub struct VMInterrupts {
     /// This is used to control both stack overflow as well as interrupting wasm
     /// modules. For more information see `crates/environ/src/cranelift.rs`.
     pub stack_limit: AtomicUsize,
-
-    /// Indicator of how much fuel has been consumed and is remaining to
-    /// WebAssembly.
-    ///
-    /// This field is typically negative and increments towards positive. Upon
-    /// turning positive a wasm trap will be generated. This field is only
-    /// modified if wasm is configured to consume fuel.
-    pub fuel_consumed: UnsafeCell<i64>,
 }
 
 impl VMInterrupts {
@@ -694,7 +668,6 @@ impl Default for VMInterrupts {
     fn default() -> VMInterrupts {
         VMInterrupts {
             stack_limit: AtomicUsize::new(usize::max_value()),
-            fuel_consumed: UnsafeCell::new(0),
         }
     }
 }
@@ -753,7 +726,7 @@ impl VMContext {
     }
 }
 
-/// Trampoline function pointer type.
+///
 pub type VMTrampoline = unsafe extern "C" fn(
     *mut VMContext,        // callee vmctx
     *mut VMContext,        // caller vmctx

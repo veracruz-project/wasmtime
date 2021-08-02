@@ -153,9 +153,10 @@ impl EncodingBuilder {
         let inst = self.inst.inst();
         assert!(
             Rc::ptr_eq(&inst.format, &recipes[self.recipe].format),
-            "Inst {} and recipe {} must have the same format!",
-            inst.name,
-            recipes[self.recipe].name
+            format!(
+                "Inst {} and recipe {} must have the same format!",
+                inst.name, recipes[self.recipe].name
+            )
         );
 
         assert_eq!(

@@ -6,6 +6,6 @@ mod spec;
 
 pub use crate::environ::dummy::DummyEnvironment;
 pub use crate::environ::spec::{
-    Alias, FuncEnvironment, GlobalVariable, ModuleEnvironment, ReturnMode, TargetEnvironment,
-    WasmError, WasmFuncType, WasmResult, WasmType,
+    FuncEnvironment, GlobalVariable, ModuleEnvironment, ReturnMode, TargetEnvironment, WasmError,
+    WasmFuncType, WasmResult, WasmType,
 };

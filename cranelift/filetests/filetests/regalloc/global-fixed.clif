@@ -1,5 +1,5 @@
 test regalloc
-target x86_64 legacy haswell
+target x86_64 haswell
 
 function %foo() system_v {
 block4:

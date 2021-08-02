@@ -1,4 +1,4 @@
-use wiggle::{GuestErrorType, GuestPtr, GuestSlice};
+use wiggle::{GuestError, GuestErrorType, GuestPtr, GuestSlice};
 use wiggle_test::WasiCtx;
 
 // This test file exists to make sure that the entire `wasi.witx` file can be
@@ -8,6 +8,7 @@ use wiggle_test::WasiCtx;
 
 wiggle::from_witx!({
     witx: ["$CARGO_MANIFEST_DIR/tests/wasi.witx"],
+    ctx: WasiCtx,
 });
 
 // The only test in this file is to verify that the witx document provided by the
@@ -28,6 +29,13 @@ type Result<T> = std::result::Result<T, types::Errno>;
 impl GuestErrorType for types::Errno {
     fn success() -> types::Errno {
         types::Errno::Success
+    }
+}
+
+impl<'a> types::GuestErrorConversion for WasiCtx<'a> {
+    fn into_errno(&self, e: GuestError) -> types::Errno {
+        eprintln!("GuestError {:?}", e);
+        types::Errno::Badf
     }
 }
 
@@ -314,7 +322,7 @@ impl<'a> crate::wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx<'a> {
         unimplemented!("poll_oneoff")
     }
 
-    fn proc_exit(&self, _rval: types::Exitcode) -> wiggle::Trap {
+    fn proc_exit(&self, _rval: types::Exitcode) -> std::result::Result<(), ()> {
         unimplemented!("proc_exit")
     }
 

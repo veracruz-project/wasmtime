@@ -4,12 +4,8 @@ use crate::ir::immediates::Uimm64;
 use crate::ir::{GlobalValue, Type};
 use core::fmt;
 
-#[cfg(feature = "enable-serde")]
-use serde::{Deserialize, Serialize};
-
 /// Information about a heap declaration.
 #[derive(Clone)]
-#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct HeapData {
     /// The address of the start of the heap's storage.
     pub base: GlobalValue,
@@ -30,7 +26,6 @@ pub struct HeapData {
 
 /// Style of heap including style-specific information.
 #[derive(Clone)]
-#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum HeapStyle {
     /// A dynamic heap can be relocated to a different base address when it is grown.
     Dynamic {

@@ -2,7 +2,7 @@
 
 use crate::isa::arm32::inst::*;
 
-use regalloc::{PrettyPrint, RealRegUniverse, Reg};
+use regalloc::{RealRegUniverse, Reg};
 
 use std::string::String;
 
@@ -265,7 +265,7 @@ impl BranchTarget {
     }
 }
 
-impl PrettyPrint for ShiftOpAndAmt {
+impl ShowWithRRU for ShiftOpAndAmt {
     fn show_rru(&self, _mb_rru: Option<&RealRegUniverse>) -> String {
         let op = match self.op() {
             ShiftOp::LSL => "lsl",
@@ -277,19 +277,19 @@ impl PrettyPrint for ShiftOpAndAmt {
     }
 }
 
-impl PrettyPrint for UImm8 {
+impl ShowWithRRU for UImm8 {
     fn show_rru(&self, _mb_rru: Option<&RealRegUniverse>) -> String {
         format!("#{}", self.value)
     }
 }
 
-impl PrettyPrint for UImm12 {
+impl ShowWithRRU for UImm12 {
     fn show_rru(&self, _mb_rru: Option<&RealRegUniverse>) -> String {
         format!("#{}", self.value)
     }
 }
 
-impl PrettyPrint for AMode {
+impl ShowWithRRU for AMode {
     fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
         match self {
             &AMode::RegReg(rn, rm, imm2) => {
@@ -317,7 +317,7 @@ impl PrettyPrint for AMode {
     }
 }
 
-impl PrettyPrint for Cond {
+impl ShowWithRRU for Cond {
     fn show_rru(&self, _mb_rru: Option<&RealRegUniverse>) -> String {
         let mut s = format!("{:?}", self);
         s.make_ascii_lowercase();
@@ -325,7 +325,7 @@ impl PrettyPrint for Cond {
     }
 }
 
-impl PrettyPrint for BranchTarget {
+impl ShowWithRRU for BranchTarget {
     fn show_rru(&self, _mb_rru: Option<&RealRegUniverse>) -> String {
         match self {
             &BranchTarget::Label(label) => format!("label{:?}", label.get()),

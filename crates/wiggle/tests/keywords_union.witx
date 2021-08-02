@@ -1,15 +1,15 @@
 (typename $union
-  (enum (@witx tag u8)
+  (enum u8
     $self
     $power
   )
 )
 
 (typename $self
-  (variant (@witx tag $union)
+  (union $union
     ;; A union variant that will expand to a strict keyword `Self`.
-    (case $self (@witx pointer f32))
+    (field $self (@witx pointer f32))
     ;; Oh it's true, that there's power in a union!
-    (case $power (@witx pointer f32))
+    (field $power (@witx pointer f32))
   )
 )

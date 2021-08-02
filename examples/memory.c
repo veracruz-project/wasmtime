@@ -54,11 +54,10 @@ void check(bool success) {
   }
 }
 
-void check_call(wasm_func_t* func, const wasm_val_vec_t* args_vec, int32_t expected) {
+void check_call(wasm_func_t* func, wasm_val_t args[], size_t num_args, int32_t expected) {
   wasm_val_t results[1];
-  wasm_val_vec_t results_vec = WASM_ARRAY_VEC(results);
   wasm_trap_t *trap = NULL;
-  wasmtime_error_t *error = wasmtime_func_call(func, args_vec, &results_vec, &trap);
+  wasmtime_error_t *error = wasmtime_func_call(func, args, num_args, results, 1, &trap);
   if (error != NULL || trap != NULL)
     exit_with_error("failed to call function", error, trap);
   if (results[0].of.i32 != expected) {
@@ -68,44 +67,42 @@ void check_call(wasm_func_t* func, const wasm_val_vec_t* args_vec, int32_t expec
 }
 
 void check_call0(wasm_func_t* func, int32_t expected) {
-  wasm_val_vec_t args_vec = WASM_EMPTY_VEC;
-  check_call(func, &args_vec, expected);
+  check_call(func, NULL, 0, expected);
 }
 
 void check_call1(wasm_func_t* func, int32_t arg, int32_t expected) {
-  wasm_val_t args[] = { WASM_I32_VAL(arg) };
-  wasm_val_vec_t args_vec = WASM_ARRAY_VEC(args);
-  check_call(func, &args_vec, expected);
+  wasm_val_t args[] = { {.kind = WASM_I32, .of = {.i32 = arg}} };
+  check_call(func, args, 1, expected);
 }
 
 void check_call2(wasm_func_t* func, int32_t arg1, int32_t arg2, int32_t expected) {
-  wasm_val_t args[] = { WASM_I32_VAL(arg1), WASM_I32_VAL(arg2) };
-  wasm_val_vec_t args_vec = WASM_ARRAY_VEC(args);
-  check_call(func, &args_vec, expected);
+  wasm_val_t args[2] = {
+    {.kind = WASM_I32, .of = {.i32 = arg1}},
+    {.kind = WASM_I32, .of = {.i32 = arg2}}
+  };
+  check_call(func, args, 2, expected);
 }
 
-void check_ok(wasm_func_t* func, const wasm_val_vec_t* args_vec) {
+void check_ok(wasm_func_t* func, wasm_val_t args[], size_t num_args) {
   wasm_trap_t *trap = NULL;
-  wasm_val_vec_t results_vec = WASM_EMPTY_VEC;
-  wasmtime_error_t *error = wasmtime_func_call(func, args_vec, &results_vec, &trap);
+  wasmtime_error_t *error = wasmtime_func_call(func, args, num_args, NULL, 0, &trap);
   if (error != NULL || trap != NULL)
     exit_with_error("failed to call function", error, trap);
 }
 
 void check_ok2(wasm_func_t* func, int32_t arg1, int32_t arg2) {
-  wasm_val_t args[] = { WASM_I32_VAL(arg1), WASM_I32_VAL(arg2) };
-  wasm_val_vec_t args_vec = WASM_ARRAY_VEC(args);
-  check_ok(func, &args_vec);
+  wasm_val_t args[2] = {
+    {.kind = WASM_I32, .of = {.i32 = arg1}},
+    {.kind = WASM_I32, .of = {.i32 = arg2}}
+  };
+  check_ok(func, args, 2);
 }
 
-void check_trap(wasm_func_t* func, const wasm_val_vec_t* args_vec, size_t num_results) {
-  assert(num_results <= 1);
+void check_trap(wasm_func_t* func, wasm_val_t args[], size_t num_args, size_t num_results) {
   wasm_val_t results[1];
-  wasm_val_vec_t results_vec;
-  results_vec.data = results;
-  results_vec.size = num_results;
+  assert(num_results <= 1);
   wasm_trap_t *trap = NULL;
-  wasmtime_error_t *error = wasmtime_func_call(func, args_vec, &results_vec, &trap);
+  wasmtime_error_t *error = wasmtime_func_call(func, args, num_args, results, num_results, &trap);
   if (error != NULL)
     exit_with_error("failed to call function", error, NULL);
   if (trap == NULL) {
@@ -116,15 +113,16 @@ void check_trap(wasm_func_t* func, const wasm_val_vec_t* args_vec, size_t num_re
 }
 
 void check_trap1(wasm_func_t* func, int32_t arg) {
-  wasm_val_t args[] = { WASM_I32_VAL(arg) };
-  wasm_val_vec_t args_vec = WASM_ARRAY_VEC(args);
-  check_trap(func, &args_vec, 1);
+  wasm_val_t args[1] = { {.kind = WASM_I32, .of = {.i32 = arg}} };
+  check_trap(func, args, 1, 1);
 }
 
 void check_trap2(wasm_func_t* func, int32_t arg1, int32_t arg2) {
-  wasm_val_t args[] = { WASM_I32_VAL(arg1), WASM_I32_VAL(arg2) };
-  wasm_val_vec_t args_vec = WASM_ARRAY_VEC(args);
-  check_trap(func, &args_vec, 0);
+  wasm_val_t args[2] = {
+    {.kind = WASM_I32, .of = {.i32 = arg1}},
+    {.kind = WASM_I32, .of = {.i32 = arg2}}
+  };
+  check_trap(func, args, 2, 0);
 }
 
 int main(int argc, const char* argv[]) {
@@ -169,8 +167,7 @@ int main(int argc, const char* argv[]) {
   printf("Instantiating module...\n");
   wasm_instance_t* instance = NULL;
   wasm_trap_t *trap = NULL;
-  wasm_extern_vec_t imports = WASM_EMPTY_VEC;
-  error = wasmtime_instance_new(store, module, &imports, &instance, &trap);
+  error = wasmtime_instance_new(store, module, NULL, 0, &instance, &trap);
   if (!instance)
     exit_with_error("failed to instantiate", error, trap);
 

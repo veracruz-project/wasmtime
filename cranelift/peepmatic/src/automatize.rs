@@ -19,23 +19,16 @@ where
 
     for opt in &opts.optimizations {
         let mut insertion = builder.insert();
-        let mut is_first = true;
-        for m in &opt.matches {
-            // Ensure that this state's associated data is this match's
-            // operation.
+        for inc in &opt.increments {
+            // Ensure that this state's associated data is this increment's
+            // match operation.
             if let Some(op) = insertion.get_state_data() {
-                assert_eq!(*op, m.operation);
+                assert_eq!(*op, inc.operation);
             } else {
-                insertion.set_state_data(m.operation);
+                insertion.set_state_data(inc.operation);
             }
 
-            let actions = if is_first {
-                is_first = false;
-                opt.actions.clone().into_boxed_slice()
-            } else {
-                vec![].into_boxed_slice()
-            };
-            insertion.next(m.expected, actions);
+            insertion.next(inc.expected, inc.actions.clone().into_boxed_slice());
         }
         insertion.finish();
     }

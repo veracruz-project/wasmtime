@@ -1,5 +1,5 @@
 (typename $errno
-    (enum (@witx tag u32)
+    (enum u32
         ;;; Success
         $ok
         ;;; Invalid argument

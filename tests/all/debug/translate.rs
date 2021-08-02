@@ -114,11 +114,7 @@ check:        DW_AT_decl_line	(10)
 #[cfg(all(
     any(target_os = "linux", target_os = "macos"),
     target_arch = "x86_64",
-    target_pointer_width = "64",
-    // Ignore test on new backend. This is a specific test with hardcoded
-    // offsets and the new backend compiles the return basic-block at a different
-    // offset, causing mismatches.
-    feature = "old-x86-backend",
+    target_pointer_width = "64"
 ))]
 fn test_debug_dwarf5_translate_lines() -> Result<()> {
     check_line_program(

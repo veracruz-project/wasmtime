@@ -296,8 +296,7 @@ impl Var {
     pub fn set_def(&mut self, position: PatternPosition, def: DefIndex) {
         assert!(
             self.get_def(position).is_none(),
-            "redefinition of variable {}",
-            self.name
+            format!("redefinition of variable {}", self.name)
         );
         match position {
             PatternPosition::Source => {
@@ -462,8 +461,7 @@ impl Apply {
         // Basic check on number of arguments.
         assert!(
             inst.operands_in.len() == args.len(),
-            "incorrect number of arguments in instruction {}",
-            inst.name
+            format!("incorrect number of arguments in instruction {}", inst.name)
         );
 
         // Check that the kinds of Literals arguments match the expected operand.

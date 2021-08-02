@@ -9,12 +9,11 @@ use cranelift_codegen::isa;
 use lightbeam::{CodeGenSession, NullOffsetSink, Sinks};
 use wasmtime_environ::wasm::{
     DefinedFuncIndex, DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, FuncIndex,
-    GlobalIndex, MemoryIndex, TableIndex, TypeIndex,
+    GlobalIndex, MemoryIndex, SignatureIndex, TableIndex,
 };
 use wasmtime_environ::{
     BuiltinFunctionIndex, CompileError, CompiledFunction, Compiler, FunctionBodyData, Module,
-    ModuleTranslation, Relocation, RelocationTarget, TrapInformation, Tunables, TypeTables,
-    VMOffsets,
+    ModuleTranslation, Relocation, RelocationTarget, TrapInformation, VMOffsets,
 };
 
 /// A compiler that compiles a WebAssembly module with Lightbeam, directly translating the Wasm file.
@@ -25,17 +24,15 @@ impl Compiler for Lightbeam {
         &self,
         translation: &ModuleTranslation,
         i: DefinedFuncIndex,
-        function_body: FunctionBodyData<'_>,
+        function_body: &FunctionBodyData<'_>,
         isa: &dyn isa::TargetIsa,
-        tunables: &Tunables,
-        _types: &TypeTables,
     ) -> Result<CompiledFunction, CompileError> {
-        if tunables.generate_native_debuginfo {
+        if translation.tunables.debug_info {
             return Err(CompileError::DebugInfoNotSupported);
         }
         let func_index = translation.module.func_index(i);
 
-        let env = FuncEnvironment::new(isa.frontend_config().pointer_bytes(), translation);
+        let env = FuncEnvironment::new(isa.frontend_config().pointer_bytes(), &translation.module);
         let mut codegen_session: CodeGenSession<_> = CodeGenSession::new(
             translation.function_body_inputs.len() as u32,
             &env,
@@ -52,7 +49,7 @@ impl Compiler for Lightbeam {
                 offsets: &mut NullOffsetSink,
             },
             i.as_u32(),
-            function_body.body,
+            wasmparser::FunctionBody::new(0, function_body.data),
         )
         .map_err(|e| CompileError::Codegen(format!("Failed to translate function: {}", e)))?;
 
@@ -87,6 +84,15 @@ struct RelocSink {
 }
 
 impl binemit::RelocSink for RelocSink {
+    fn reloc_block(
+        &mut self,
+        _offset: binemit::CodeOffset,
+        _reloc: binemit::Reloc,
+        _block_offset: binemit::CodeOffset,
+    ) {
+        // This should use the `offsets` field of `ir::Function`.
+        panic!("block headers not yet implemented");
+    }
     fn reloc_external(
         &mut self,
         offset: binemit::CodeOffset,
@@ -159,11 +165,12 @@ impl binemit::TrapSink for TrapSink {
     fn trap(
         &mut self,
         code_offset: binemit::CodeOffset,
-        _source_loc: ir::SourceLoc,
+        source_loc: ir::SourceLoc,
         trap_code: ir::TrapCode,
     ) {
         self.traps.push(TrapInformation {
             code_offset,
+            source_loc,
             trap_code,
         });
     }
@@ -179,10 +186,10 @@ struct FuncEnvironment<'module_environment> {
 }
 
 impl<'module_environment> FuncEnvironment<'module_environment> {
-    fn new(pointer_bytes: u8, translation: &'module_environment ModuleTranslation<'_>) -> Self {
+    fn new(pointer_bytes: u8, module: &'module_environment Module) -> Self {
         Self {
-            module: &translation.module,
-            offsets: VMOffsets::new(pointer_bytes, &translation.module),
+            module,
+            offsets: VMOffsets::new(pointer_bytes, module),
         }
     }
 }
@@ -220,8 +227,8 @@ impl lightbeam::ModuleContext for FuncEnvironment<'_> {
         self.module.functions[FuncIndex::from_u32(func_idx)].as_u32()
     }
 
-    fn signature(&self, _index: u32) -> &Self::Signature {
-        panic!("not implemented")
+    fn signature(&self, index: u32) -> &Self::Signature {
+        &self.module.signatures[SignatureIndex::from_u32(index)].1
     }
 
     fn defined_table_index(&self, table_index: u32) -> Option<u32> {
@@ -320,7 +327,7 @@ impl lightbeam::ModuleContext for FuncEnvironment<'_> {
     }
     fn vmctx_vmshared_signature_id(&self, signature_idx: u32) -> u32 {
         self.offsets
-            .vmctx_vmshared_signature_id(TypeIndex::from_u32(signature_idx))
+            .vmctx_vmshared_signature_id(SignatureIndex::from_u32(signature_idx))
     }
 
     // TODO: type of a global

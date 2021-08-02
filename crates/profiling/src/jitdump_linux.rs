@@ -1,6 +1,6 @@
 //! Support for jitdump files which can be used by perf for profiling jitted code.
 //! Spec definitions for the output format is as described here:
-//! <https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/perf/Documentation/jitdump-specification.txt>
+//! https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/perf/Documentation/jitdump-specification.txt
 //!
 //! Usage Example:
 //!     Record
@@ -241,7 +241,6 @@ impl State {
             Architecture::X86_32(_) => elf::EM_386 as u32,
             Architecture::Arm(_) => elf::EM_ARM as u32,
             Architecture::Aarch64(_) => elf::EM_AARCH64 as u32,
-            Architecture::S390x => elf::EM_S390 as u32,
             _ => unimplemented!("unrecognized architecture"),
         }
     }
@@ -250,7 +249,11 @@ impl State {
         let header = FileHeader {
             timestamp: self.get_time_stamp(),
             e_machine: self.get_e_machine(),
-            magic: 0x4A695444,
+            magic: if cfg!(target_endian = "little") {
+                0x4A695444
+            } else {
+                0x4454694a
+            },
             version: 1,
             size: mem::size_of::<FileHeader>() as u32,
             pad1: 0,
@@ -371,7 +374,7 @@ impl State {
         pid: u32,
         tid: u32,
     ) -> Result<()> {
-        let file = object::File::parse(dbg_image).unwrap();
+        let file = object::File::parse(&dbg_image).unwrap();
         let endian = if file.is_little_endian() {
             gimli::RunTimeEndian::Little
         } else {
@@ -386,7 +389,8 @@ impl State {
             }
         };
 
-        let dwarf_cow = gimli::Dwarf::load(&load_section)?;
+        let load_section_sup = |_| Ok(borrow::Cow::Borrowed(&[][..]));
+        let dwarf_cow = gimli::Dwarf::load(&load_section, &load_section_sup)?;
         let borrow_section: &dyn for<'a> Fn(
             &'a borrow::Cow<[u8]>,
         )
@@ -598,9 +602,9 @@ impl State {
                 header: RecordHeader {
                     id: RecordId::JitCodeDebugInfo as u32,
                     record_size: 0,
-                    timestamp,
+                    timestamp: timestamp,
                 },
-                address,
+                address: address,
                 count: 0,
             };
 
@@ -616,9 +620,9 @@ impl State {
                     )
                     .unwrap();
                 let filename = myfile.to_string_lossy()?;
-                let line = row.line().map(|nonzero| nonzero.get()).unwrap_or(0);
+                let line = row.line().unwrap_or(0);
                 let column = match row.column() {
-                    gimli::ColumnType::Column(column) => column.get(),
+                    gimli::ColumnType::Column(column) => column,
                     gimli::ColumnType::LeftEdge => 0,
                 };
 

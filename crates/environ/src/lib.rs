@@ -16,8 +16,9 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::map_unwrap_or,
-        clippy::clippy::print_stdout,
+        clippy::option_map_unwrap_or,
+        clippy::option_map_unwrap_or_else,
+        clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
@@ -36,10 +37,13 @@ pub use crate::address_map::*;
 pub use crate::builtin::*;
 pub use crate::compilation::*;
 pub use crate::data_structures::*;
-pub use crate::module::*;
+// pub use crate::func_environ::BuiltinFunctionIndex;
+pub use crate::module::{
+    EntityIndex, MemoryPlan, MemoryStyle, Module, TableElements, TablePlan, TableStyle,
+};
 pub use crate::module_environ::*;
 pub use crate::tunables::Tunables;
-pub use crate::vmoffsets::*;
+pub use crate::vmoffsets::{TargetSharedSignatureIndex, VMOffsets, INTERRUPTED};
 
 /// WebAssembly page sizes are defined to be 64KiB.
 pub const WASM_PAGE_SIZE: u32 = 0x10000;

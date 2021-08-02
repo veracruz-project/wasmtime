@@ -3,7 +3,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 
 use anyhow::{bail, ensure, Error};
-use object::endian::{BigEndian, Endian, Endianness, LittleEndian};
 use object::{RelocationEncoding, RelocationKind};
 use std::collections::HashMap;
 
@@ -19,20 +18,13 @@ pub fn create_gdbjit_image(
     defined_funcs_offset: usize,
     funcs: &[*const u8],
 ) -> Result<Vec<u8>, Error> {
-    let e = ensure_supported_elf_format(&bytes)?;
+    ensure_supported_elf_format(&mut bytes)?;
 
     // patch relocs
-    relocate_dwarf_sections(&bytes, defined_funcs_offset, funcs)?;
+    relocate_dwarf_sections(&mut bytes, defined_funcs_offset, funcs)?;
 
     // elf is still missing details...
-    match e {
-        Endianness::Little => {
-            convert_object_elf_to_loadable_file::<LittleEndian>(&mut bytes, code_region)
-        }
-        Endianness::Big => {
-            convert_object_elf_to_loadable_file::<BigEndian>(&mut bytes, code_region)
-        }
-    }
+    convert_object_elf_to_loadable_file(&mut bytes, code_region);
 
     // let mut file = ::std::fs::File::create(::std::path::Path::new("test.o")).expect("file");
     // ::std::io::Write::write_all(&mut file, &bytes).expect("write");
@@ -41,20 +33,20 @@ pub fn create_gdbjit_image(
 }
 
 fn relocate_dwarf_sections(
-    bytes: &[u8],
+    bytes: &mut [u8],
     defined_funcs_offset: usize,
     funcs: &[*const u8],
 ) -> Result<(), Error> {
-    use object::read::{File, Object, ObjectSection, ObjectSymbol, RelocationTarget};
+    use object::read::{File, Object, ObjectSection, RelocationTarget};
 
     let obj = File::parse(bytes)?;
     let mut func_symbols = HashMap::new();
-    for sym in obj.symbols() {
+    for (id, sym) in obj.symbols() {
         match (sym.name(), sym.section_index()) {
-            (Ok(name), Some(_section_index)) if name.starts_with("_wasm_function_") => {
+            (Some(name), Some(_section_index)) if name.starts_with("_wasm_function_") => {
                 let index = name["_wasm_function_".len()..].parse::<usize>()?;
                 let data = funcs[index - defined_funcs_offset];
-                func_symbols.insert(sym.index(), data);
+                func_symbols.insert(id, data);
             }
             _ => (),
         }
@@ -91,33 +83,20 @@ fn relocate_dwarf_sections(
     Ok(())
 }
 
-fn ensure_supported_elf_format(bytes: &[u8]) -> Result<Endianness, Error> {
+fn ensure_supported_elf_format(bytes: &mut Vec<u8>) -> Result<(), Error> {
     use object::elf::*;
-    use object::read::elf::*;
+    use object::endian::LittleEndian;
     use std::mem::size_of;
 
-    let kind = match object::FileKind::parse(bytes) {
-        Ok(file) => file,
-        Err(err) => {
-            bail!("Failed to parse file: {}", err);
-        }
-    };
-    let header = match kind {
-        object::FileKind::Elf64 => match object::elf::FileHeader64::<Endianness>::parse(bytes) {
-            Ok(header) => header,
-            Err(err) => {
-                bail!("Unsupported ELF file: {}", err);
-            }
-        },
-        _ => {
-            bail!("only 64-bit ELF files currently supported")
-        }
-    };
-    let e = header.endian().unwrap();
-
+    let e = LittleEndian;
+    let header: &FileHeader64<LittleEndian> =
+        unsafe { &*(bytes.as_mut_ptr() as *const FileHeader64<_>) };
+    ensure!(
+        header.e_ident.class == ELFCLASS64 && header.e_ident.data == ELFDATA2LSB,
+        "bits and endianess in .ELF",
+    );
     match header.e_machine.get(e) {
         EM_X86_64 => (),
-        EM_S390 => (),
         machine => {
             bail!("Unsupported ELF target machine: {:x}", machine);
         }
@@ -127,25 +106,23 @@ fn ensure_supported_elf_format(bytes: &[u8]) -> Result<Endianness, Error> {
         "program header table is empty"
     );
     let e_shentsize = header.e_shentsize.get(e);
-    let req_shentsize = match e {
-        Endianness::Little => size_of::<SectionHeader64<LittleEndian>>(),
-        Endianness::Big => size_of::<SectionHeader64<BigEndian>>(),
-    };
-    ensure!(e_shentsize as usize == req_shentsize, "size of sh");
-    Ok(e)
+    ensure!(
+        e_shentsize as usize == size_of::<SectionHeader64<LittleEndian>>(),
+        "size of sh"
+    );
+    Ok(())
 }
 
-fn convert_object_elf_to_loadable_file<E: Endian>(
-    bytes: &mut Vec<u8>,
-    code_region: (*const u8, usize),
-) {
+fn convert_object_elf_to_loadable_file(bytes: &mut Vec<u8>, code_region: (*const u8, usize)) {
     use object::elf::*;
+    use object::endian::LittleEndian;
     use std::ffi::CStr;
     use std::mem::size_of;
     use std::os::raw::c_char;
 
-    let e = E::default();
-    let header: &FileHeader64<E> = unsafe { &*(bytes.as_mut_ptr() as *const FileHeader64<_>) };
+    let e = LittleEndian;
+    let header: &FileHeader64<LittleEndian> =
+        unsafe { &*(bytes.as_mut_ptr() as *const FileHeader64<_>) };
 
     let e_shentsize = header.e_shentsize.get(e);
     let e_shoff = header.e_shoff.get(e);
@@ -153,7 +130,7 @@ fn convert_object_elf_to_loadable_file<E: Endian>(
     let mut shstrtab_off = 0;
     for i in 0..e_shnum {
         let off = e_shoff as isize + i as isize * e_shentsize as isize;
-        let section: &SectionHeader64<E> =
+        let section: &SectionHeader64<LittleEndian> =
             unsafe { &*(bytes.as_ptr().offset(off) as *const SectionHeader64<_>) };
         if section.sh_type.get(e) != SHT_STRTAB {
             continue;
@@ -163,7 +140,7 @@ fn convert_object_elf_to_loadable_file<E: Endian>(
     let mut segment: Option<_> = None;
     for i in 0..e_shnum {
         let off = e_shoff as isize + i as isize * e_shentsize as isize;
-        let section: &mut SectionHeader64<E> =
+        let section: &mut SectionHeader64<LittleEndian> =
             unsafe { &mut *(bytes.as_mut_ptr().offset(off) as *mut SectionHeader64<_>) };
         if section.sh_type.get(e) != SHT_PROGBITS {
             continue;
@@ -194,12 +171,12 @@ fn convert_object_elf_to_loadable_file<E: Endian>(
 
     // LLDB wants segment with virtual address set, placing them at the end of ELF.
     let ph_off = bytes.len();
-    let e_phentsize = size_of::<ProgramHeader64<E>>();
+    let e_phentsize = size_of::<ProgramHeader64<LittleEndian>>();
     let e_phnum = 1;
     bytes.resize(ph_off + e_phentsize * e_phnum, 0);
     if let Some((sh_offset, sh_size)) = segment {
         let (v_offset, size) = code_region;
-        let program: &mut ProgramHeader64<E> =
+        let program: &mut ProgramHeader64<LittleEndian> =
             unsafe { &mut *(bytes.as_ptr().add(ph_off) as *mut ProgramHeader64<_>) };
         program.p_type.set(e, PT_LOAD);
         program.p_offset.set(e, sh_offset);
@@ -212,7 +189,7 @@ fn convert_object_elf_to_loadable_file<E: Endian>(
     }
 
     // It is somewhat loadable ELF file at this moment.
-    let header: &mut FileHeader64<E> =
+    let header: &mut FileHeader64<LittleEndian> =
         unsafe { &mut *(bytes.as_mut_ptr() as *mut FileHeader64<_>) };
     header.e_type.set(e, ET_DYN);
     header.e_phoff.set(e, ph_off as u64);

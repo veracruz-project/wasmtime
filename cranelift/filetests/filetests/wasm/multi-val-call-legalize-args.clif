@@ -1,5 +1,5 @@
 test legalizer
-target x86_64 legacy haswell
+target x86_64 haswell
 
 ;; Test if arguments are legalized if function uses sret
 

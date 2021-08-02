@@ -7,12 +7,10 @@
 
 // You can execute this example with `cargo run --example multi`
 
-use anyhow::Result;
+use anyhow::{format_err, Result};
+use wasmtime::*;
 
-#[cfg(not(feature = "old-x86-backend"))]
 fn main() -> Result<()> {
-    use wasmtime::*;
-
     println!("Initializing...");
     let engine = Engine::default();
     let store = Store::new(&engine);
@@ -24,8 +22,8 @@ fn main() -> Result<()> {
     // Create external print functions.
     println!("Creating callback...");
     let callback_type = FuncType::new(
-        [ValType::I32, ValType::I64].iter().cloned(),
-        [ValType::I64, ValType::I32].iter().cloned(),
+        Box::new([ValType::I32, ValType::I64]),
+        Box::new([ValType::I64, ValType::I32]),
     );
     let callback_func = Func::new(&store, callback_type, |_, args, results| {
         println!("Calling back...");
@@ -42,36 +40,51 @@ fn main() -> Result<()> {
 
     // Extract exports.
     println!("Extracting export...");
-    let g = instance.get_typed_func::<(i32, i64), (i64, i32)>("g")?;
+    let g = instance
+        .get_func("g")
+        .ok_or(format_err!("failed to find export `g`"))?;
 
     // Call `$g`.
     println!("Calling export \"g\"...");
-    let (a, b) = g.call((1, 3))?;
+    let results = g.call(&[Val::I32(1), Val::I64(3)])?;
 
     println!("Printing result...");
-    println!("> {} {}", a, b);
+    println!("> {} {}", results[0].unwrap_i64(), results[1].unwrap_i32());
 
-    assert_eq!(a, 4);
-    assert_eq!(b, 2);
+    assert_eq!(results[0].unwrap_i64(), 4);
+    assert_eq!(results[1].unwrap_i32(), 2);
 
     // Call `$round_trip_many`.
     println!("Calling export \"round_trip_many\"...");
     let round_trip_many = instance
-        .get_typed_func::<
-        (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64),
-        (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64),
-        >
-        ("round_trip_many")?;
-    let results = round_trip_many.call((0, 1, 2, 3, 4, 5, 6, 7, 8, 9))?;
+        .get_func("round_trip_many")
+        .ok_or(format_err!("failed to find export `round_trip_many`"))?;
+    let args = vec![
+        Val::I64(0),
+        Val::I64(1),
+        Val::I64(2),
+        Val::I64(3),
+        Val::I64(4),
+        Val::I64(5),
+        Val::I64(6),
+        Val::I64(7),
+        Val::I64(8),
+        Val::I64(9),
+    ];
+    let results = round_trip_many.call(&args)?;
 
     println!("Printing result...");
-    println!("> {:?}", results);
-    assert_eq!(results, (0, 1, 2, 3, 4, 5, 6, 7, 8, 9));
+    print!(">");
+    for r in results.iter() {
+        print!(" {}", r.unwrap_i64());
+    }
+    println!();
 
-    Ok(())
-}
+    assert_eq!(results.len(), 10);
+    assert!(args
+        .iter()
+        .zip(results.iter())
+        .all(|(a, r)| a.i64() == r.i64()));
 
-#[cfg(feature = "old-x86-backend")]
-fn main() -> Result<()> {
     Ok(())
 }

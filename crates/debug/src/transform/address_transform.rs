@@ -102,7 +102,7 @@ fn build_function_lookup(
     let mut ranges_index = BTreeMap::new();
     let mut current_range = Vec::new();
     let mut last_gen_inst_empty = false;
-    for (i, t) in ft.instructions.iter().enumerate() {
+    for t in &ft.instructions {
         if t.srcloc.is_default() {
             continue;
         }
@@ -111,11 +111,8 @@ fn build_function_lookup(
         assert_le!(fn_start, offset);
         assert_le!(offset, fn_end);
 
-        let inst_gen_start = t.code_offset as usize;
-        let inst_gen_end = match ft.instructions.get(i + 1) {
-            Some(i) => i.code_offset as usize,
-            None => ft.body_len as usize,
-        };
+        let inst_gen_start = t.code_offset;
+        let inst_gen_end = t.code_offset + t.code_len;
 
         if last_wasm_pos > offset {
             // Start new range.
@@ -152,7 +149,7 @@ fn build_function_lookup(
         }
         last_wasm_pos = offset;
     }
-    let last_gen_addr = ft.body_offset + ft.body_len as usize;
+    let last_gen_addr = ft.body_offset + ft.body_len;
     ranges_index.insert(range_wasm_start, ranges.len());
     ranges.push(Range {
         wasm_start: range_wasm_start,
@@ -196,13 +193,13 @@ fn build_function_addr_map(
     for (_, f) in funcs {
         let ft = &f.address_map;
         let mut fn_map = Vec::new();
-        for t in ft.instructions.iter() {
+        for t in &ft.instructions {
             if t.srcloc.is_default() {
                 continue;
             }
             let offset = get_wasm_code_offset(t.srcloc, code_section_offset);
             fn_map.push(AddressMap {
-                generated: t.code_offset as usize,
+                generated: t.code_offset,
                 wasm: offset,
             });
         }
@@ -216,7 +213,7 @@ fn build_function_addr_map(
 
         map.push(FunctionMap {
             offset: ft.body_offset,
-            len: ft.body_len as usize,
+            len: ft.body_len,
             wasm_start: get_wasm_code_offset(ft.start_srcloc, code_section_offset),
             wasm_end: get_wasm_code_offset(ft.end_srcloc, code_section_offset),
             addresses: fn_map.into_boxed_slice(),
@@ -608,7 +605,6 @@ mod tests {
     use super::{build_function_lookup, get_wasm_code_offset, AddressTransform};
     use gimli::write::Address;
     use std::iter::FromIterator;
-    use std::mem;
     use wasmtime_environ::entity::PrimaryMap;
     use wasmtime_environ::ir::SourceLoc;
     use wasmtime_environ::{CompiledFunction, WasmFileInfo};
@@ -630,21 +626,14 @@ mod tests {
                 InstructionAddressMap {
                     srcloc: SourceLoc::new(wasm_offset + 2),
                     code_offset: 5,
-                },
-                InstructionAddressMap {
-                    srcloc: SourceLoc::default(),
-                    code_offset: 8,
+                    code_len: 3,
                 },
                 InstructionAddressMap {
                     srcloc: SourceLoc::new(wasm_offset + 7),
                     code_offset: 15,
+                    code_len: 8,
                 },
-                InstructionAddressMap {
-                    srcloc: SourceLoc::default(),
-                    code_offset: 23,
-                },
-            ]
-            .into(),
+            ],
             start_srcloc: SourceLoc::new(wasm_offset),
             end_srcloc: SourceLoc::new(wasm_offset + 10),
             body_offset: 0,
@@ -689,16 +678,11 @@ mod tests {
     fn test_build_function_lookup_two_ranges() {
         let mut input = create_simple_func(11);
         // append instruction with same srcloc as input.instructions[0]
-        let mut list = Vec::from(mem::take(&mut input.instructions));
-        list.push(InstructionAddressMap {
+        input.instructions.push(InstructionAddressMap {
             srcloc: SourceLoc::new(11 + 2),
             code_offset: 23,
+            code_len: 3,
         });
-        list.push(InstructionAddressMap {
-            srcloc: SourceLoc::default(),
-            code_offset: 26,
-        });
-        input.instructions = list.into();
         let (start, end, lookup) = build_function_lookup(&input, 1);
         assert_eq!(10, start);
         assert_eq!(20, end);

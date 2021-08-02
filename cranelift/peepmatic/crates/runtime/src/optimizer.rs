@@ -27,10 +27,9 @@ where
 {
     pub(crate) peep_opt: &'peep PeepholeOptimizations<TInstructionSet::Operator>,
     pub(crate) instr_set: TInstructionSet,
-    pub(crate) left_hand_sides: Vec<Part<TInstructionSet::Instruction>>,
     pub(crate) right_hand_sides: Vec<Part<TInstructionSet::Instruction>>,
     pub(crate) actions: Vec<Action<TInstructionSet::Operator>>,
-    pub(crate) backtracking_states: Vec<(State, usize, usize)>,
+    pub(crate) backtracking_states: Vec<(State, usize)>,
 }
 
 impl<'peep, 'ctx, TInstructionSet> Debug for PeepholeOptimizer<'peep, 'ctx, TInstructionSet>
@@ -41,7 +40,6 @@ where
         let PeepholeOptimizer {
             peep_opt,
             instr_set: _,
-            left_hand_sides,
             right_hand_sides,
             actions,
             backtracking_states,
@@ -49,7 +47,6 @@ where
         f.debug_struct("PeepholeOptimizer")
             .field("peep_opt", peep_opt)
             .field("instr_set", &"_")
-            .field("left_hand_sides", left_hand_sides)
             .field("right_hand_sides", right_hand_sides)
             .field("actions", actions)
             .field("backtracking_states", backtracking_states)
@@ -120,8 +117,12 @@ where
         for action in actions.drain(..) {
             log::trace!("Evaluating action: {:?}", action);
             match action {
-                Action::GetLhs { lhs } => {
-                    let lhs = self.left_hand_sides[lhs.0 as usize];
+                Action::GetLhs { path } => {
+                    let path = self.peep_opt.paths.lookup(path);
+                    let lhs = self
+                        .instr_set
+                        .get_part_at_path(context, root, path)
+                        .expect("should always get part at path OK by the time it is bound");
                     self.right_hand_sides.push(lhs);
                 }
                 Action::UnaryUnquote { operator, operand } => {
@@ -283,17 +284,22 @@ where
 
         log::trace!("Evaluating match operation: {:?}", match_op);
         let result: MatchResult = (|| match match_op {
-            Opcode(id) => {
-                let part = self.left_hand_sides[id.0 as usize];
-                let inst = part.as_instruction().ok_or(Else)?;
-                let op = self
+            Opcode { path } => {
+                let path = self.peep_opt.paths.lookup(path);
+                let part = self
                     .instr_set
-                    .operator(context, inst, &mut self.left_hand_sides)
+                    .get_part_at_path(context, root, path)
                     .ok_or(Else)?;
+                let inst = part.as_instruction().ok_or(Else)?;
+                let op = self.instr_set.operator(context, inst).ok_or(Else)?;
                 Ok(op.into())
             }
-            IsConst(id) => {
-                let part = self.left_hand_sides[id.0 as usize];
+            IsConst { path } => {
+                let path = self.peep_opt.paths.lookup(path);
+                let part = self
+                    .instr_set
+                    .get_part_at_path(context, root, path)
+                    .ok_or(Else)?;
                 let is_const = match part {
                     Part::Instruction(i) => {
                         self.instr_set.instruction_to_constant(context, i).is_some()
@@ -302,8 +308,12 @@ where
                 };
                 bool_to_match_result(is_const)
             }
-            IsPowerOfTwo(id) => {
-                let part = self.left_hand_sides[id.0 as usize];
+            IsPowerOfTwo { path } => {
+                let path = self.peep_opt.paths.lookup(path);
+                let part = self
+                    .instr_set
+                    .get_part_at_path(context, root, path)
+                    .ok_or(Else)?;
                 match part {
                     Part::Constant(c) => {
                         let is_pow2 = c.as_int().unwrap().is_power_of_two();
@@ -317,11 +327,18 @@ where
                         let is_pow2 = c.as_int().unwrap().is_power_of_two();
                         bool_to_match_result(is_pow2)
                     }
-                    Part::ConditionCode(_) => unreachable!("IsPowerOfTwo on a condition code"),
+                    Part::ConditionCode(_) => unreachable!(
+                        "IsPowerOfTwo on a condition
+        code"
+                    ),
                 }
             }
-            BitWidth(id) => {
-                let part = self.left_hand_sides[id.0 as usize];
+            BitWidth { path } => {
+                let path = self.peep_opt.paths.lookup(path);
+                let part = self
+                    .instr_set
+                    .get_part_at_path(context, root, path)
+                    .ok_or(Else)?;
                 let bit_width = match part {
                     Part::Instruction(i) => self.instr_set.instruction_result_bit_width(context, i),
                     Part::Constant(Constant::Int(_, w)) | Part::Constant(Constant::Bool(_, w)) => {
@@ -338,11 +355,15 @@ where
                 );
                 Ok(unsafe { NonZeroU32::new_unchecked(bit_width as u32) })
             }
-            FitsInNativeWord(id) => {
+            FitsInNativeWord { path } => {
                 let native_word_size = self.instr_set.native_word_size_in_bits(context);
                 debug_assert!(native_word_size.is_power_of_two());
 
-                let part = self.left_hand_sides[id.0 as usize];
+                let path = self.peep_opt.paths.lookup(path);
+                let part = self
+                    .instr_set
+                    .get_part_at_path(context, root, path)
+                    .ok_or(Else)?;
                 let fits = match part {
                     Part::Instruction(i) => {
                         let size = self.instr_set.instruction_result_bit_width(context, i);
@@ -357,9 +378,17 @@ where
                 };
                 bool_to_match_result(fits)
             }
-            Eq(a, b) => {
-                let part_a = self.left_hand_sides[a.0 as usize];
-                let part_b = self.left_hand_sides[b.0 as usize];
+            Eq { path_a, path_b } => {
+                let path_a = self.peep_opt.paths.lookup(path_a);
+                let part_a = self
+                    .instr_set
+                    .get_part_at_path(context, root, path_a)
+                    .ok_or(Else)?;
+                let path_b = self.peep_opt.paths.lookup(path_b);
+                let part_b = self
+                    .instr_set
+                    .get_part_at_path(context, root, path_b)
+                    .ok_or(Else)?;
                 let eq = match (part_a, part_b) {
                     (Part::Instruction(inst), Part::Constant(c1))
                     | (Part::Constant(c1), Part::Instruction(inst)) => {
@@ -372,8 +401,12 @@ where
                 };
                 bool_to_match_result(eq)
             }
-            IntegerValue(id) => {
-                let part = self.left_hand_sides[id.0 as usize];
+            IntegerValue { path } => {
+                let path = self.peep_opt.paths.lookup(path);
+                let part = self
+                    .instr_set
+                    .get_part_at_path(context, root, path)
+                    .ok_or(Else)?;
                 match part {
                     Part::Constant(c) => {
                         let x = c.as_int().ok_or(Else)?;
@@ -392,8 +425,12 @@ where
                     Part::ConditionCode(_) => unreachable!("IntegerValue on condition code"),
                 }
             }
-            BooleanValue(id) => {
-                let part = self.left_hand_sides[id.0 as usize];
+            BooleanValue { path } => {
+                let path = self.peep_opt.paths.lookup(path);
+                let part = self
+                    .instr_set
+                    .get_part_at_path(context, root, path)
+                    .ok_or(Else)?;
                 match part {
                     Part::Constant(c) => {
                         let b = c.as_bool().ok_or(Else)?;
@@ -410,8 +447,12 @@ where
                     Part::ConditionCode(_) => unreachable!("IntegerValue on condition code"),
                 }
             }
-            ConditionCode(id) => {
-                let part = self.left_hand_sides[id.0 as usize];
+            ConditionCode { path } => {
+                let path = self.peep_opt.paths.lookup(path);
+                let part = self
+                    .instr_set
+                    .get_part_at_path(context, root, path)
+                    .ok_or(Else)?;
                 let cc = part.as_condition_code().ok_or(Else)?;
                 let cc = cc as u32;
                 debug_assert!(cc != 0);
@@ -442,20 +483,12 @@ where
         self.backtracking_states.clear();
         self.actions.clear();
         self.right_hand_sides.clear();
-        self.left_hand_sides.clear();
-
-        // `LhsId(0)` is always the root.
-        self.left_hand_sides.push(Part::Instruction(root));
 
         let mut r#final = None;
 
         let mut query = self.peep_opt.automata.query();
         loop {
             log::trace!("Current state: {:?}", query.current_state());
-            log::trace!(
-                "self.left_hand_sides = {:#?}",
-                self.left_hand_sides.iter().enumerate().collect::<Vec<_>>()
-            );
 
             if query.is_in_final_state() {
                 // If we're in a final state (which means an optimization is
@@ -474,11 +507,8 @@ where
             // optimization, we want to be able to backtrack to this state and
             // then try taking the `Else` transition.
             if query.has_transition_on(&Err(Else)) {
-                self.backtracking_states.push((
-                    query.current_state(),
-                    self.actions.len(),
-                    self.left_hand_sides.len(),
-                ));
+                self.backtracking_states
+                    .push((query.current_state(), self.actions.len()));
             }
 
             let match_op = match query.current_state_data() {
@@ -492,10 +522,9 @@ where
                 actions
             } else if r#final.is_some() {
                 break;
-            } else if let Some((state, actions_len, lhs_len)) = self.backtracking_states.pop() {
+            } else if let Some((state, actions_len)) = self.backtracking_states.pop() {
                 query.go_to_state(state);
                 self.actions.truncate(actions_len);
-                self.left_hand_sides.truncate(lhs_len);
                 query
                     .next(&Err(Else))
                     .expect("backtracking states always have `Else` transitions")

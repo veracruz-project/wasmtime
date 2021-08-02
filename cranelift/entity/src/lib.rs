@@ -39,8 +39,9 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::map_unwrap_or,
-        clippy::clippy::print_stdout,
+        clippy::option_map_unwrap_or,
+        clippy::option_map_unwrap_or_else,
+        clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
@@ -70,25 +71,21 @@ macro_rules! entity_impl {
     // Basic traits.
     ($entity:ident) => {
         impl $crate::EntityRef for $entity {
-            #[inline]
             fn new(index: usize) -> Self {
                 debug_assert!(index < ($crate::__core::u32::MAX as usize));
                 $entity(index as u32)
             }
 
-            #[inline]
             fn index(self) -> usize {
                 self.0 as usize
             }
         }
 
         impl $crate::packed_option::ReservedValue for $entity {
-            #[inline]
             fn reserved_value() -> $entity {
                 $entity($crate::__core::u32::MAX)
             }
 
-            #[inline]
             fn is_reserved_value(&self) -> bool {
                 self.0 == $crate::__core::u32::MAX
             }
@@ -97,7 +94,6 @@ macro_rules! entity_impl {
         impl $entity {
             /// Create a new instance from a `u32`.
             #[allow(dead_code)]
-            #[inline]
             pub fn from_u32(x: u32) -> Self {
                 debug_assert!(x < $crate::__core::u32::MAX);
                 $entity(x)
@@ -105,7 +101,6 @@ macro_rules! entity_impl {
 
             /// Return the underlying index value as a `u32`.
             #[allow(dead_code)]
-            #[inline]
             pub fn as_u32(self) -> u32 {
                 self.0
             }

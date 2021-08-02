@@ -17,7 +17,6 @@
 use arbitrary::{Arbitrary, Unstructured};
 use std::collections::BTreeMap;
 use std::mem;
-use wasm_smith::Module;
 use wasmparser::*;
 
 #[derive(Arbitrary, Debug)]
@@ -32,7 +31,7 @@ struct Swarm {
 }
 
 /// A call to one of Wasmtime's public APIs.
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 #[allow(missing_docs)]
 pub enum ApiCall {
     ConfigNew,
@@ -40,7 +39,7 @@ pub enum ApiCall {
     ConfigInterruptable(bool),
     EngineNew,
     StoreNew,
-    ModuleNew { id: usize, wasm: Module },
+    ModuleNew { id: usize, wasm: super::WasmOptTtf },
     ModuleDrop { id: usize },
     InstanceNew { id: usize, module: usize },
     InstanceDrop { id: usize },
@@ -79,8 +78,8 @@ pub struct ApiCalls {
     pub calls: Vec<ApiCall>,
 }
 
-impl<'a> Arbitrary<'a> for ApiCalls {
-    fn arbitrary(input: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+impl Arbitrary for ApiCalls {
+    fn arbitrary(input: &mut Unstructured) -> arbitrary::Result<Self> {
         crate::init_fuzzing();
 
         let swarm = Swarm::arbitrary(input)?;
@@ -107,9 +106,8 @@ impl<'a> Arbitrary<'a> for ApiCalls {
             if swarm.module_new {
                 choices.push(|input, scope| {
                     let id = scope.next_id();
-                    let mut wasm = Module::arbitrary(input)?;
-                    wasm.ensure_termination(1000);
-                    let predicted_rss = predict_rss(&wasm.to_bytes()).unwrap_or(0);
+                    let wasm = super::WasmOptTtf::arbitrary(input)?;
+                    let predicted_rss = predict_rss(&wasm.wasm).unwrap_or(0);
                     scope.modules.insert(id, predicted_rss);
                     Ok(ModuleNew { id, wasm })
                 });
@@ -175,7 +173,7 @@ impl<'a> Arbitrary<'a> for ApiCalls {
                 // We can generate arbitrary `WasmOptTtf` instances, which have
                 // no upper bound on the number of bytes they consume. This sets
                 // the upper bound to `None`.
-                <Module as Arbitrary>::size_hint(depth),
+                <super::WasmOptTtf as Arbitrary>::size_hint(depth),
             )
         })
     }
@@ -221,10 +219,7 @@ fn predict_rss(wasm: &[u8]) -> Result<usize> {
             // the minimum amount of memory to our predicted rss.
             Payload::MemorySection(s) => {
                 for entry in s {
-                    let initial = match entry? {
-                        MemoryType::M32 { limits, .. } => limits.initial as usize,
-                        MemoryType::M64 { limits, .. } => limits.initial as usize,
-                    };
+                    let initial = entry?.limits.initial as usize;
                     prediction += initial * 64 * 1024;
                 }
             }

@@ -1,5 +1,5 @@
 test legalizer
-target x86_64 legacy
+target x86_64
 
 ; Test legalization for various forms of table addresses.
 ; regex: BB=block\d+
