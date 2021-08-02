@@ -9,7 +9,7 @@ use wasmtime_runtime::{InstantiationError, VMFunctionBody, VMTrampoline};
 
 pub mod ir {
     pub(super) use cranelift_codegen::ir::{
-        AbiParam, ConstantOffset, JumpTable, Signature, SourceLoc,
+        AbiParam, ArgumentPurpose, ConstantOffset, JumpTable, Signature, SourceLoc,
     };
     pub use cranelift_codegen::ir::{
         ExternalName, Function, InstBuilder, MemFlags, StackSlotData, StackSlotKind,
@@ -38,9 +38,7 @@ pub fn make_trampoline(
     assert!(compiled_function.relocations.is_empty());
     let ptr = code_memory
         .allocate_for_function(&compiled_function)
-        .map_err(|message| {
-            SetupError::Instantiate(InstantiationError::Resource(anyhow::anyhow!(message)))
-        })?
+        .map_err(|message| SetupError::Instantiate(InstantiationError::Resource(message)))?
         .as_ptr();
     Ok(unsafe { std::mem::transmute::<*const VMFunctionBody, VMTrampoline>(ptr) })
 }
@@ -52,8 +50,16 @@ pub(crate) fn build_trampoline(
     value_size: usize,
 ) -> Result<CompiledFunction, SetupError> {
     let pointer_type = isa.pointer_type();
-    let mut wrapper_sig =
-        wasmtime_cranelift::blank_sig(isa, wasmtime_cranelift::wasmtime_call_conv(isa));
+    let mut wrapper_sig = ir::Signature::new(isa.frontend_config().default_call_conv);
+
+    // Add the callee `vmctx` parameter.
+    wrapper_sig.params.push(ir::AbiParam::special(
+        pointer_type,
+        ir::ArgumentPurpose::VMContext,
+    ));
+
+    // Add the caller `vmctx` parameter.
+    wrapper_sig.params.push(ir::AbiParam::new(pointer_type));
 
     // Add the `callee_address` parameter.
     wrapper_sig.params.push(ir::AbiParam::new(pointer_type));
@@ -178,6 +184,14 @@ impl TrampolineRelocSink {
 }
 
 impl binemit::RelocSink for TrampolineRelocSink {
+    fn reloc_block(
+        &mut self,
+        _offset: binemit::CodeOffset,
+        _reloc: binemit::Reloc,
+        _block_offset: binemit::CodeOffset,
+    ) {
+        panic!("trampoline compilation should not produce block relocs");
+    }
     fn reloc_external(
         &mut self,
         offset: binemit::CodeOffset,

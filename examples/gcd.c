@@ -65,8 +65,7 @@ int main() {
   wasm_byte_vec_delete(&wasm);
   wasm_trap_t *trap = NULL;
   wasm_instance_t *instance = NULL;
-  wasm_extern_vec_t imports = WASM_EMPTY_VEC;
-  error = wasmtime_instance_new(store, module, &imports, &instance, &trap);
+  error = wasmtime_instance_new(store, module, NULL, 0, &instance, &trap);
   if (instance == NULL)
     exit_with_error("failed to instantiate", error, trap);
 
@@ -80,11 +79,13 @@ int main() {
   // And call it!
   int a = 6;
   int b = 27;
-  wasm_val_t params[2] = { WASM_I32_VAL(a), WASM_I32_VAL(b) };
+  wasm_val_t params[2];
   wasm_val_t results[1];
-  wasm_val_vec_t params_vec = WASM_ARRAY_VEC(params);
-  wasm_val_vec_t results_vec = WASM_ARRAY_VEC(results);
-  error = wasmtime_func_call(gcd, &params_vec, &results_vec, &trap);
+  params[0].kind = WASM_I32;
+  params[0].of.i32 = a;
+  params[1].kind = WASM_I32;
+  params[1].of.i32 = b;
+  error = wasmtime_func_call(gcd, params, 2, results, 1, &trap);
   if (error != NULL || trap != NULL)
     exit_with_error("failed to call gcd", error, trap);
   assert(results[0].kind == WASM_I32);

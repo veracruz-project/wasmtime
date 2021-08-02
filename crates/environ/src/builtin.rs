@@ -18,8 +18,10 @@ macro_rules! foreach_builtin_function {
             table_init(vmctx, i32, i32, i32, i32, i32) -> ();
             /// Returns an index for wasm's `elem.drop`.
             elem_drop(vmctx, i32) -> ();
-            /// Returns an index for wasm's `memory.copy`
-            memory_copy(vmctx, i32, i32, i32, i32, i32) -> ();
+            /// Returns an index for wasm's `memory.copy` for locally defined memories.
+            defined_memory_copy(vmctx, i32, i32, i32, i32) -> ();
+            /// Returns an index for wasm's `memory.copy` for imported memories.
+            imported_memory_copy(vmctx, i32, i32, i32, i32) -> ();
             /// Returns an index for wasm's `memory.fill` for locally defined memories.
             memory_fill(vmctx, i32, i32, i32, i32) -> ();
             /// Returns an index for wasm's `memory.fill` for imported memories.
@@ -45,20 +47,6 @@ macro_rules! foreach_builtin_function {
             externref_global_get(vmctx, i32) -> (reference);
             /// Returns an index for Wasm's `global.get` instruction for `externref`s.
             externref_global_set(vmctx, i32, reference) -> ();
-            /// Returns an index for wasm's `memory.atomic.notify` for locally defined memories.
-            memory_atomic_notify(vmctx, i32, i32, i32) -> (i32);
-            /// Returns an index for wasm's `memory.atomic.notify` for imported memories.
-            imported_memory_atomic_notify(vmctx, i32, i32, i32) -> (i32);
-            /// Returns an index for wasm's `memory.atomic.wait32` for locally defined memories.
-            memory_atomic_wait32(vmctx, i32, i32, i32, i64) -> (i32);
-            /// Returns an index for wasm's `memory.atomic.wait32` for imported memories.
-            imported_memory_atomic_wait32(vmctx, i32, i32, i32, i64) -> (i32);
-            /// Returns an index for wasm's `memory.atomic.wait64` for locally defined memories.
-            memory_atomic_wait64(vmctx, i32, i32, i64, i64) -> (i32);
-            /// Returns an index for wasm's `memory.atomic.wait64` for imported memories.
-            imported_memory_atomic_wait64(vmctx, i32, i32, i64, i64) -> (i32);
-            /// Invoked when fuel has run out while executing a function.
-            out_of_gas(vmctx) -> ();
         }
     };
 }

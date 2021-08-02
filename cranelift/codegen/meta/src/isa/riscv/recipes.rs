@@ -25,8 +25,7 @@ impl RecipeGroup {
     fn push(&mut self, builder: EncodingRecipeBuilder) {
         assert!(
             self.name_to_recipe.get(&builder.name).is_none(),
-            "riscv recipe '{}' created twice",
-            builder.name
+            format!("riscv recipe '{}' created twice", builder.name)
         );
         let name = builder.name.clone();
         let number = self.recipes.push(builder.build());

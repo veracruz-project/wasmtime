@@ -19,11 +19,17 @@ pub enum GuestError {
     BorrowCheckerOutOfHandles,
     #[error("Slice length mismatch")]
     SliceLengthsDiffer,
-    #[error("In func {modulename}::{funcname} at {location}: {err}")]
+    #[error("In func {funcname}:{location}:")]
     InFunc {
-        modulename: &'static str,
         funcname: &'static str,
         location: &'static str,
+        #[source]
+        err: Box<GuestError>,
+    },
+    #[error("In data {typename}.{field}:")]
+    InDataField {
+        typename: String,
+        field: String,
         #[source]
         err: Box<GuestError>,
     },

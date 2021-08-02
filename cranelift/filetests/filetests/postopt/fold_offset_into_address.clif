@@ -1,5 +1,5 @@
 test postopt
-target x86_64 legacy
+target x86_64
 
 ; Fold the immediate of an iadd_imm into an address offset.
 

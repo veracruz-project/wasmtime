@@ -31,6 +31,7 @@ pub fn subtest(parsed: &TestCommand) -> anyhow::Result<Box<dyn SubTest>> {
 
 /// Code sink that generates text.
 struct TextSink {
+    code_size: binemit::CodeOffset,
     offset: binemit::CodeOffset,
     text: String,
 }
@@ -39,6 +40,7 @@ impl TextSink {
     /// Create a new empty TextSink.
     pub fn new() -> Self {
         Self {
+            code_size: 0,
             offset: 0,
             text: String::new(),
         }
@@ -70,6 +72,10 @@ impl binemit::CodeSink for TextSink {
         self.offset += 8;
     }
 
+    fn reloc_block(&mut self, reloc: binemit::Reloc, block_offset: binemit::CodeOffset) {
+        write!(self.text, "{}({}) ", reloc, block_offset).unwrap();
+    }
+
     fn reloc_external(
         &mut self,
         _srcloc: ir::SourceLoc,
@@ -96,7 +102,9 @@ impl binemit::CodeSink for TextSink {
         write!(self.text, "{} ", code).unwrap();
     }
 
-    fn begin_jumptables(&mut self) {}
+    fn begin_jumptables(&mut self) {
+        self.code_size = self.offset
+    }
     fn begin_rodata(&mut self) {}
     fn end_codegen(&mut self) {}
     fn add_stack_map(

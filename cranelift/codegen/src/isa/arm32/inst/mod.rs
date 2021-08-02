@@ -4,11 +4,11 @@
 
 use crate::binemit::CodeOffset;
 use crate::ir::types::{B1, B16, B32, B8, I16, I32, I8, IFLAGS};
-use crate::ir::{ExternalName, Opcode, TrapCode, Type};
+use crate::ir::{ExternalName, Opcode, SourceLoc, TrapCode, Type};
 use crate::machinst::*;
 use crate::{settings, CodegenError, CodegenResult};
 
-use regalloc::{PrettyPrint, RealRegUniverse, Reg, RegClass, SpillSlot, VirtualReg, Writable};
+use regalloc::{RealRegUniverse, Reg, RegClass, SpillSlot, VirtualReg, Writable};
 use regalloc::{RegUsageCollector, RegUsageMapper};
 
 use alloc::boxed::Box;
@@ -82,6 +82,7 @@ pub struct CallInfo {
     pub dest: ExternalName,
     pub uses: Vec<Reg>,
     pub defs: Vec<Writable<Reg>>,
+    pub loc: SourceLoc,
     pub opcode: Opcode,
 }
 
@@ -92,6 +93,7 @@ pub struct CallIndInfo {
     pub rm: Reg,
     pub uses: Vec<Reg>,
     pub defs: Vec<Writable<Reg>>,
+    pub loc: SourceLoc,
     pub opcode: Opcode,
 }
 
@@ -215,6 +217,7 @@ pub enum Inst {
     Store {
         rt: Reg,
         mem: AMode,
+        srcloc: Option<SourceLoc>,
         bits: u8,
     },
 
@@ -223,6 +226,7 @@ pub enum Inst {
     Load {
         rt: Writable<Reg>,
         mem: AMode,
+        srcloc: Option<SourceLoc>,
         bits: u8,
         sign_extend: bool,
     },
@@ -271,6 +275,7 @@ pub enum Inst {
     LoadExtName {
         rt: Writable<Reg>,
         name: Box<ExternalName>,
+        srcloc: SourceLoc,
         offset: i32,
     },
 
@@ -302,13 +307,13 @@ pub enum Inst {
     /// unit to the register allocator.
     TrapIf {
         cond: Cond,
-        trap_info: TrapCode,
+        trap_info: (SourceLoc, TrapCode),
     },
 
     /// An instruction guaranteed to always be undefined and to trigger an illegal instruction at
     /// runtime.
     Udf {
-        trap_info: TrapCode,
+        trap_info: (SourceLoc, TrapCode),
     },
 
     /// A "breakpoint" instruction, used for e.g. traps and debug breakpoints.
@@ -384,6 +389,7 @@ impl Inst {
         Inst::Load {
             rt: into_reg,
             mem,
+            srcloc: None,
             bits,
             sign_extend: false,
         }
@@ -398,6 +404,7 @@ impl Inst {
         Inst::Store {
             rt: from_reg,
             mem,
+            srcloc: None,
             bits,
         }
     }
@@ -806,17 +813,12 @@ impl MachInst for Inst {
         Inst::mov(to_reg, from_reg)
     }
 
-    fn gen_constant<F: FnMut(Type) -> Writable<Reg>>(
-        to_regs: ValueRegs<Writable<Reg>>,
-        value: u128,
+    fn gen_constant<F: FnMut(RegClass, Type) -> Writable<Reg>>(
+        to_reg: Writable<Reg>,
+        value: u64,
         ty: Type,
         _alloc_tmp: F,
     ) -> SmallVec<[Inst; 4]> {
-        let to_reg = to_regs
-            .only_reg()
-            .expect("multi-reg values not supported yet");
-        let value = value as u64;
-
         match ty {
             B1 | I8 | B8 | I16 | B16 | I32 | B32 => {
                 let v: i64 = value as i64;
@@ -830,10 +832,11 @@ impl MachInst for Inst {
         }
     }
 
+    fn gen_zero_len_nop() -> Inst {
+        Inst::Nop0
+    }
+
     fn gen_nop(preferred_size: usize) -> Inst {
-        if preferred_size == 0 {
-            return Inst::Nop0;
-        }
         assert!(preferred_size >= 2);
         Inst::Nop2
     }
@@ -842,10 +845,10 @@ impl MachInst for Inst {
         None
     }
 
-    fn rc_for_type(ty: Type) -> CodegenResult<(&'static [RegClass], &'static [Type])> {
+    fn rc_for_type(ty: Type) -> CodegenResult<RegClass> {
         match ty {
-            I8 | I16 | I32 | B1 | B8 | B16 | B32 => Ok((&[RegClass::I32], &[I32])),
-            IFLAGS => Ok((&[RegClass::I32], &[I32])),
+            I8 | I16 | I32 | B1 | B8 | B16 | B32 => Ok(RegClass::I32),
+            IFLAGS => Ok(RegClass::I32),
             _ => Err(CodegenError::Unsupported(format!(
                 "Unexpected SSA-value type: {}",
                 ty
@@ -894,7 +897,7 @@ fn mem_finalize_for_show(
     (mem_str, mem)
 }
 
-impl PrettyPrint for Inst {
+impl ShowWithRRU for Inst {
     fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
         self.pretty_print(mb_rru, &mut EmitState::default())
     }
@@ -1185,6 +1188,7 @@ impl Inst {
                 rt,
                 ref name,
                 offset,
+                srcloc: _srcloc,
             } => {
                 let rt = rt.show_rru(mb_rru);
                 format!("ldr {}, [pc, #4] ; b 4 ; data {:?} + {}", rt, name, offset)

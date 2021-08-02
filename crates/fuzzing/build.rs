@@ -13,12 +13,11 @@ fn main() {
         .unwrap()
         .join("../../tests/spec_testsuite");
     let mut code = format!("static FILES: &[(&str, &str)] = &[\n");
-    let mut entries = dir
+    let entries = dir
         .read_dir()
         .unwrap()
         .map(|p| p.unwrap().path().display().to_string())
         .collect::<Vec<_>>();
-    entries.sort();
     for path in entries {
         if !path.ends_with(".wast") {
             continue;

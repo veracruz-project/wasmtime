@@ -6,9 +6,10 @@ const FD_VAL: u32 = 123;
 
 wiggle::from_witx!({
     witx: ["$CARGO_MANIFEST_DIR/tests/handles.witx"],
+    ctx: WasiCtx,
 });
 
-impl_errno!(types::Errno);
+impl_errno!(types::Errno, types::GuestErrorConversion);
 
 impl<'a> handle_examples::HandleExamples for WasiCtx<'a> {
     fn fd_create(&self) -> Result<types::Fd, types::Errno> {
@@ -36,7 +37,7 @@ impl HandleExercise {
 
         let e = handle_examples::fd_create(&ctx, &host_memory, self.return_loc.ptr as i32);
 
-        assert_eq!(e, Ok(types::Errno::Ok as i32), "fd_create error");
+        assert_eq!(e, types::Errno::Ok.into(), "fd_create error");
 
         let h_got: u32 = host_memory
             .ptr(self.return_loc.ptr)
@@ -47,13 +48,13 @@ impl HandleExercise {
 
         let e = handle_examples::fd_consume(&ctx, &host_memory, h_got as i32);
 
-        assert_eq!(e, Ok(types::Errno::Ok as i32), "fd_consume error");
+        assert_eq!(e, types::Errno::Ok.into(), "fd_consume error");
 
         let e = handle_examples::fd_consume(&ctx, &host_memory, h_got as i32 + 1);
 
         assert_eq!(
             e,
-            Ok(types::Errno::InvalidArg as i32),
+            types::Errno::InvalidArg.into(),
             "fd_consume invalid error"
         );
     }

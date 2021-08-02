@@ -1,24 +1,12 @@
-use crate::{
-    signatures::SignatureCollection,
-    types::{ExportType, ExternType, ImportType},
-};
-use crate::{Engine, ModuleType};
+use crate::frame_info::GlobalFrameInfoRegistration;
+use crate::runtime::{Config, Engine};
+use crate::types::{EntityType, ExportType, ExternType, ImportType};
 use anyhow::{bail, Context, Result};
-use std::fs;
 use std::path::Path;
-use std::sync::Arc;
-use wasmparser::Validator;
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "cache")]
 use wasmtime_cache::ModuleCacheEntry;
-use wasmtime_environ::entity::PrimaryMap;
-use wasmtime_environ::wasm::ModuleIndex;
-use wasmtime_jit::{CompilationArtifacts, CompiledModule, TypeTables};
-
-mod registry;
-mod serialization;
-
-pub use registry::{FrameInfo, FrameSymbol, GlobalModuleRegistry, ModuleRegistry};
-pub use serialization::SerializedModule;
+use wasmtime_jit::{CompilationArtifacts, CompiledModule};
 
 /// A compiled WebAssembly module, ready to be instantiated.
 ///
@@ -36,7 +24,7 @@ pub use serialization::SerializedModule;
 /// compiling the original wasm module only once with a single [`Module`]
 /// instance.
 ///
-/// The `Module` is thread-safe and safe to share across threads.
+/// The `Module` is threadsafe and safe to share accross threads.
 ///
 /// ## Modules and `Clone`
 ///
@@ -90,46 +78,31 @@ pub use serialization::SerializedModule;
 /// [`Config`]: crate::Config
 #[derive(Clone)]
 pub struct Module {
-    inner: Arc<ModuleInner>,
-}
-
-struct ModuleInner {
     engine: Engine,
-    /// The compiled artifacts for this module that will be instantiated and
-    /// executed.
-    module: Arc<CompiledModule>,
-    /// Closed-over compilation artifacts used to create submodules when this
-    /// module is instantiated.
-    artifact_upvars: Vec<Arc<CompiledModule>>,
-    /// Closed-over module values which are used when this module is
-    /// instantiated.
-    module_upvars: Vec<Module>,
-    /// Type information of this module and all `artifact_upvars` compiled
-    /// modules.
-    types: Arc<TypeTables>,
-    /// Registered shared signature for the module.
-    signatures: Arc<SignatureCollection>,
+    compiled: Arc<CompiledModule>,
+    frame_info_registration: Arc<Mutex<Option<Option<Arc<GlobalFrameInfoRegistration>>>>>,
 }
 
 impl Module {
     /// Creates a new WebAssembly `Module` from the given in-memory `bytes`.
     ///
-    /// The `bytes` provided must be in one of the following formats:
+    /// The `bytes` provided must be in one of two formats:
     ///
-    /// * A [binary-encoded][binary] WebAssembly module. This is always supported.
-    /// * A [text-encoded][text] instance of the WebAssembly text format.
-    ///   This is only supported when the `wat` feature of this crate is enabled.
-    ///   If this is supplied then the text format will be parsed before validation.
-    ///   Note that the `wat` feature is enabled by default.
+    /// * It can be a [binary-encoded][binary] WebAssembly module. This
+    ///   is always supported.
+    /// * It may also be a [text-encoded][text] instance of the WebAssembly
+    ///   text format. This is only supported when the `wat` feature of this
+    ///   crate is enabled. If this is supplied then the text format will be
+    ///   parsed before validation. Note that the `wat` feature is enabled by
+    ///   default.
     ///
     /// The data for the wasm module must be loaded in-memory if it's present
     /// elsewhere, for example on disk. This requires that the entire binary is
     /// loaded into memory all at once, this API does not support streaming
     /// compilation of a module.
     ///
-    /// If the module has not been already been compiled, the WebAssembly binary will
-    /// be decoded and validated. It will also be compiled according to the
-    /// configuration of the provided `engine`.
+    /// The WebAssembly binary will be decoded and validated. It will also be
+    /// compiled according to the configuration of the provided `engine`.
     ///
     /// # Errors
     ///
@@ -142,7 +115,7 @@ impl Module {
     /// * Implementation-specific limits were exceeded with a valid binary (for
     ///   example too many locals)
     /// * The wasm binary may use features that are not enabled in the
-    ///   configuration of `engine`
+    ///   configuration of `enging`
     /// * If the `wat` feature is enabled and the input is text, then it may be
     ///   rejected if it fails to parse.
     ///
@@ -178,10 +151,9 @@ impl Module {
     /// # }
     /// ```
     pub fn new(engine: &Engine, bytes: impl AsRef<[u8]>) -> Result<Module> {
-        let bytes = bytes.as_ref();
         #[cfg(feature = "wat")]
-        let bytes = wat::parse_bytes(bytes)?;
-        Self::from_binary(engine, &bytes)
+        let bytes = wat::parse_bytes(bytes.as_ref())?;
+        Module::from_binary(engine, bytes.as_ref())
     }
 
     /// Creates a new WebAssembly `Module` from the given in-memory `binary`
@@ -189,8 +161,8 @@ impl Module {
     ///
     /// See [`Module::new`] for other details.
     pub fn new_with_name(engine: &Engine, bytes: impl AsRef<[u8]>, name: &str) -> Result<Module> {
-        let mut module = Self::new(engine, bytes.as_ref())?;
-        Arc::get_mut(&mut Arc::get_mut(&mut module.inner).unwrap().module)
+        let mut module = Module::new(engine, bytes.as_ref())?;
+        Arc::get_mut(&mut module.compiled)
             .unwrap()
             .module_mut()
             .expect("mutable module")
@@ -227,23 +199,11 @@ impl Module {
     /// # }
     /// ```
     pub fn from_file(engine: &Engine, file: impl AsRef<Path>) -> Result<Module> {
-        match Self::new(
-            engine,
-            &fs::read(&file).with_context(|| "failed to read input file")?,
-        ) {
-            Ok(m) => Ok(m),
-            Err(e) => {
-                cfg_if::cfg_if! {
-                    if #[cfg(feature = "wat")] {
-                        let mut e = e.downcast::<wat::Error>()?;
-                        e.set_path(file);
-                        bail!(e)
-                    } else {
-                        Err(e)
-                    }
-                }
-            }
-        }
+        #[cfg(feature = "wat")]
+        let wasm = wat::parse_file(file)?;
+        #[cfg(not(feature = "wat"))]
+        let wasm = std::fs::read(file)?;
+        Module::new(engine, &wasm)
     }
 
     /// Creates a new WebAssembly `Module` from the given in-memory `binary`
@@ -251,8 +211,8 @@ impl Module {
     ///
     /// This is similar to [`Module::new`] except that it requires that the
     /// `binary` input is a WebAssembly binary, the text format is not supported
-    /// by this function. It's generally recommended to use [`Module::new`], but
-    /// if it's required to not support the text format this function can be
+    /// by this function. It's generally recommended to use [`Module::new`],
+    /// but if it's required to not support the text format this function can be
     /// used instead.
     ///
     /// # Examples
@@ -278,168 +238,42 @@ impl Module {
     /// # }
     /// ```
     pub fn from_binary(engine: &Engine, binary: &[u8]) -> Result<Module> {
-        // Check to see that the config's target matches the host
-        let target = engine.config().isa_flags.triple();
-        if *target != target_lexicon::Triple::host() {
-            bail!(
-                "target '{}' specified in the configuration does not match the host",
-                target
-            );
-        }
-
-        // FIXME: we may want to validate that the ISA flags in the config match those that
-        // would be inferred for the host, otherwise the JIT might produce unrunnable code
-        // for the features the host's CPU actually has.
-
-        const USE_PAGED_MEM_INIT: bool = cfg!(all(feature = "uffd", target_os = "linux"));
-
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "cache")] {
-                let (main_module, artifacts, types) = ModuleCacheEntry::new(
-                    "wasmtime",
-                    engine.cache_config(),
-                )
-                .get_data((engine.compiler(), binary), |(compiler, binary)| {
-                    CompilationArtifacts::build(compiler, binary, USE_PAGED_MEM_INIT)
-                })?;
-            } else {
-                let (main_module, artifacts, types) =
-                    CompilationArtifacts::build(engine.compiler(), binary, USE_PAGED_MEM_INIT)?;
-            }
-        };
-
-        let modules = CompiledModule::from_artifacts_list(
-            artifacts,
-            engine.compiler().isa(),
-            &*engine.config().profiler,
-        )?;
-
-        Self::from_parts(engine, modules, main_module, Arc::new(types), &[])
+        Module::validate(engine, binary)?;
+        // Note that the call to `from_binary_unchecked` here should be ok
+        // because we previously validated the binary, meaning we're guaranteed
+        // to pass a valid binary for `engine`.
+        unsafe { Module::from_binary_unchecked(engine, binary) }
     }
 
-    /// Deserializes an in-memory compiled module previously created with
-    /// [`Module::serialize`] or [`Engine::precompile_module`].
+    /// Creates a new WebAssembly `Module` from the given in-memory `binary`
+    /// data, skipping validation and asserting that `binary` is a valid
+    /// WebAssembly module.
     ///
-    /// This function will deserialize the binary blobs emitted by
-    /// [`Module::serialize`] and [`Engine::precompile_module`] back into an
-    /// in-memory [`Module`] that's ready to be instantiated.
+    /// This function is the same as [`Module::new`] except that it skips the
+    /// call to [`Module::validate`] and it does not support the text format of
+    /// WebAssembly. The WebAssembly binary is not validated for
+    /// correctness and it is simply assumed as valid.
+    ///
+    /// For more information about creation of a module and the `engine` argument
+    /// see the documentation of [`Module::new`].
     ///
     /// # Unsafety
     ///
-    /// This function is marked as `unsafe` because if fed invalid input or used
-    /// improperly this could lead to memory safety vulnerabilities. This method
-    /// should not, for example, be exposed to arbitrary user input.
+    /// This function is `unsafe` due to the unchecked assumption that the input
+    /// `binary` is valid. If the `binary` is not actually a valid wasm binary it
+    /// may cause invalid machine code to get generated, cause panics, etc.
     ///
-    /// The structure of the binary blob read here is only lightly validated
-    /// internally in `wasmtime`. This is intended to be an efficient
-    /// "rehydration" for a [`Module`] which has very few runtime checks beyond
-    /// deserialization. Arbitrary input could, for example, replace valid
-    /// compiled code with any other valid compiled code, meaning that this can
-    /// trivially be used to execute arbitrary code otherwise.
+    /// It is only safe to call this method if [`Module::validate`] succeeds on
+    /// the same arguments passed to this function.
     ///
-    /// For these reasons this function is `unsafe`. This function is only
-    /// designed to receive the previous input from [`Module::serialize`] and
-    /// [`Engine::precompile_module`]. If the exact output of those functions
-    /// (unmodified) is passed to this function then calls to this function can
-    /// be considered safe. It is the caller's responsibility to provide the
-    /// guarantee that only previously-serialized bytes are being passed in
-    /// here.
+    /// # Errors
     ///
-    /// Note that this function is designed to be safe receiving output from
-    /// *any* compiled version of `wasmtime` itself. This means that it is safe
-    /// to feed output from older versions of Wasmtime into this function, in
-    /// addition to newer versions of wasmtime (from the future!). These inputs
-    /// will deterministically and safely produce an `Err`. This function only
-    /// successfully accepts inputs from the same version of `wasmtime`, but the
-    /// safety guarantee only applies to externally-defined blobs of bytes, not
-    /// those defined by any version of wasmtime. (this means that if you cache
-    /// blobs across versions of wasmtime you can be safely guaranteed that
-    /// future versions of wasmtime will reject old cache entries).
-    pub unsafe fn deserialize(engine: &Engine, bytes: impl AsRef<[u8]>) -> Result<Module> {
-        let module = SerializedModule::from_bytes(bytes.as_ref())?;
-        module.into_module(engine)
-    }
-
-    fn from_parts(
-        engine: &Engine,
-        mut modules: Vec<Arc<CompiledModule>>,
-        main_module: usize,
-        types: Arc<TypeTables>,
-        module_upvars: &[serialization::SerializedModuleUpvar],
-    ) -> Result<Self> {
-        // Validate the module can be used with the current allocator
-        engine.allocator().validate(modules[main_module].module())?;
-
-        let signatures = Arc::new(SignatureCollection::new_for_module(
-            engine.signatures(),
-            &types.wasm_signatures,
-            modules.iter().flat_map(|m| m.trampolines().iter().cloned()),
-        ));
-
-        let module = modules.remove(main_module);
-
-        let module_upvars = module_upvars
-            .iter()
-            .map(|m| {
-                mk(
-                    engine,
-                    &modules,
-                    &types,
-                    m.index,
-                    &m.artifact_upvars,
-                    &m.module_upvars,
-                    &signatures,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        return Ok(Self {
-            inner: Arc::new(ModuleInner {
-                engine: engine.clone(),
-                types,
-                module,
-                artifact_upvars: modules,
-                module_upvars,
-                signatures,
-            }),
-        });
-
-        fn mk(
-            engine: &Engine,
-            artifacts: &[Arc<CompiledModule>],
-            types: &Arc<TypeTables>,
-            module_index: usize,
-            artifact_upvars: &[usize],
-            module_upvars: &[serialization::SerializedModuleUpvar],
-            signatures: &Arc<SignatureCollection>,
-        ) -> Result<Module> {
-            Ok(Module {
-                inner: Arc::new(ModuleInner {
-                    engine: engine.clone(),
-                    types: types.clone(),
-                    module: artifacts[module_index].clone(),
-                    artifact_upvars: artifact_upvars
-                        .iter()
-                        .map(|i| artifacts[*i].clone())
-                        .collect(),
-                    module_upvars: module_upvars
-                        .into_iter()
-                        .map(|m| {
-                            mk(
-                                engine,
-                                artifacts,
-                                types,
-                                m.index,
-                                &m.artifact_upvars,
-                                &m.module_upvars,
-                                signatures,
-                            )
-                        })
-                        .collect::<Result<Vec<_>>>()?,
-                    signatures: signatures.clone(),
-                }),
-            })
-        }
+    /// This function may fail for many of the same reasons as [`Module::new`].
+    /// While this assumes that the binary is valid it still needs to actually
+    /// be somewhat valid for decoding purposes, and the basics of decoding can
+    /// still fail.
+    pub unsafe fn from_binary_unchecked(engine: &Engine, binary: &[u8]) -> Result<Module> {
+        Module::compile(engine, binary)
     }
 
     /// Validates `binary` input data as a WebAssembly binary given the
@@ -452,7 +286,8 @@ impl Module {
     /// configuration for WebAssembly features, for example, which are used to
     /// indicate what should be valid and what shouldn't be.
     ///
-    /// Validation automatically happens as part of [`Module::new`].
+    /// Validation automatically happens as part of [`Module::new`], but is a
+    /// requirement for [`Module::from_binary_unchecked`] to be safe.
     ///
     /// # Errors
     ///
@@ -462,111 +297,79 @@ impl Module {
     ///
     /// [binary]: https://webassembly.github.io/spec/core/binary/index.html
     pub fn validate(engine: &Engine, binary: &[u8]) -> Result<()> {
-        let mut validator = Validator::new();
-        validator.wasm_features(engine.config().features);
-        validator.validate_all(binary)?;
+        engine.config().validator().validate_all(binary)?;
         Ok(())
     }
 
-    /// Returns the type signature of this module.
-    pub fn ty(&self) -> ModuleType {
-        let mut sig = ModuleType::new();
-        let env_module = self.compiled_module().module();
-        let types = self.types();
-        for (module, field, ty) in env_module.imports() {
-            sig.add_named_import(module, field, ExternType::from_wasmtime(types, &ty));
-        }
-        for (name, index) in env_module.exports.iter() {
-            sig.add_named_export(
-                name,
-                ExternType::from_wasmtime(types, &env_module.type_of(*index)),
-            );
-        }
-        sig
+    unsafe fn compile(engine: &Engine, binary: &[u8]) -> Result<Self> {
+        #[cfg(feature = "cache")]
+        let artifacts = ModuleCacheEntry::new("wasmtime", engine.cache_config())
+            .get_data((engine.compiler(), binary), |(compiler, binary)| {
+                CompilationArtifacts::build(compiler, binary)
+            })?;
+        #[cfg(not(feature = "cache"))]
+        let artifacts = CompilationArtifacts::build(engine.compiler(), binary)?;
+
+        let compiled = CompiledModule::from_artifacts(
+            artifacts,
+            engine.compiler().isa(),
+            &*engine.config().profiler,
+        )?;
+
+        Ok(Module {
+            engine: engine.clone(),
+            compiled: Arc::new(compiled),
+            frame_info_registration: Arc::new(Mutex::new(None)),
+        })
     }
 
-    /// Serialize the module to a vector of bytes.
-    ///
-    /// Use `Module::new` or `Module::from_binary` to create the module
-    /// from the bytes.
+    /// Serialize compilation artifacts to the buffer. See also `deseriaize`.
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        SerializedModule::new(self).to_bytes()
+        let artifacts = (
+            compiler_fingerprint(self.engine.config()),
+            self.compiled.to_compilation_artifacts(),
+        );
+
+        let mut buffer = Vec::new();
+        bincode::serialize_into(&mut buffer, &artifacts)?;
+
+        Ok(buffer)
     }
 
-    /// Creates a submodule `Module` value from the specified parameters.
+    /// Deserializes and creates a module from the compilatio nartifacts.
+    /// The `serialize` saves the compilation artifacts along with the host
+    /// fingerprint, which consists of target, compiler flags, and wasmtime
+    /// package version.
     ///
-    /// This is used for creating submodules as part of module instantiation.
-    ///
-    /// * `artifact_index` - the index in `artifact_upvars` that we're creating
-    ///   a module for
-    /// * `artifact_upvars` - the mapping of indices of what artifact upvars are
-    ///   needed for the submodule. The length of this array is the length of
-    ///   the upvars array in the submodule to be created, and each element of
-    ///   this array is an index into this module's upvar array.
-    /// * `module_upvars` - similar to `artifact_upvars` this is a mapping of
-    ///   how to create the `module_upvars` of the submodule being created.
-    ///   Each entry in this array is either an index into this module's own
-    ///   module upvars array or it's an index into `modules`, the list of
-    ///   modules so far for the instance where this submodule is being
-    ///   created.
-    /// * `modules` - array indexed by `module_upvars`.
-    ///
-    /// Note that the real meat of this happens in `ModuleEnvironment`
-    /// translation inside of `wasmtime_environ`. This just does the easy thing
-    /// of handling all the indices, over there is where the indices are
-    /// actually calculated and such.
-    pub(crate) fn create_submodule(
-        &self,
-        artifact_index: usize,
-        artifact_upvars: &[usize],
-        module_upvars: &[wasmtime_environ::ModuleUpvar],
-        modules: &PrimaryMap<ModuleIndex, Module>,
-    ) -> Module {
-        Module {
-            inner: Arc::new(ModuleInner {
-                types: self.inner.types.clone(),
-                engine: self.inner.engine.clone(),
-                module: self.inner.artifact_upvars[artifact_index].clone(),
-                artifact_upvars: artifact_upvars
-                    .iter()
-                    .map(|i| self.inner.artifact_upvars[*i].clone())
-                    .collect(),
-                module_upvars: module_upvars
-                    .iter()
-                    .map(|i| match *i {
-                        wasmtime_environ::ModuleUpvar::Inherit(i) => {
-                            self.inner.module_upvars[i].clone()
-                        }
-                        wasmtime_environ::ModuleUpvar::Local(i) => modules[i].clone(),
-                    })
-                    .collect(),
-                signatures: self.inner.signatures.clone(),
-            }),
+    /// The method will fail if fingerprints of current host and serialized
+    /// one are different. The method does not verify the serialized artifacts
+    /// for modifications or curruptions. All responsibily of signing and its
+    /// verification falls on the embedder.
+    pub fn deserialize(engine: &Engine, serialized: &[u8]) -> Result<Module> {
+        let expected_fingerprint = compiler_fingerprint(engine.config());
+
+        let (fingerprint, artifacts) =
+            bincode::deserialize_from::<_, (u64, CompilationArtifacts)>(serialized)
+                .context("Deserialize compilation artifacts")?;
+        if fingerprint != expected_fingerprint {
+            bail!("Incompatible compilation artifact");
         }
+
+        let compiled = CompiledModule::from_artifacts(
+            artifacts,
+            engine.compiler().isa(),
+            &*engine.config().profiler,
+        )?;
+
+        Ok(Module {
+            engine: engine.clone(),
+            compiled: Arc::new(compiled),
+            frame_info_registration: Arc::new(Mutex::new(None)),
+        })
     }
 
-    pub(crate) fn compiled_module(&self) -> &Arc<CompiledModule> {
-        &self.inner.module
-    }
-
-    pub(crate) fn env_module(&self) -> &wasmtime_environ::Module {
-        self.compiled_module().module()
-    }
-
-    pub(crate) fn types(&self) -> &Arc<TypeTables> {
-        &self.inner.types
-    }
-
-    pub(crate) fn signatures(&self) -> &Arc<SignatureCollection> {
-        &self.inner.signatures
-    }
-
-    /// Looks up the module upvar value at the `index` specified.
-    ///
-    /// Note that this panics if `index` is out of bounds since this should
-    /// only be called for valid indices as part of instantiation.
-    pub(crate) fn module_upvar(&self, index: usize) -> &Module {
-        &self.inner.module_upvars[index]
+    pub(crate) fn compiled_module(&self) -> &CompiledModule {
+        &self.compiled
     }
 
     /// Returns identifier/name that this [`Module`] has. This name
@@ -594,7 +397,7 @@ impl Module {
     /// # }
     /// ```
     pub fn name(&self) -> Option<&str> {
-        self.compiled_module().module().name.as_deref()
+        self.compiled.module().name.as_deref()
     }
 
     /// Returns the list of imports that this [`Module`] has and must be
@@ -638,7 +441,7 @@ impl Module {
     /// assert_eq!(module.imports().len(), 1);
     /// let import = module.imports().next().unwrap();
     /// assert_eq!(import.module(), "host");
-    /// assert_eq!(import.name(), Some("foo"));
+    /// assert_eq!(import.name(), "foo");
     /// match import.ty() {
     ///     ExternType::Func(_) => { /* ... */ }
     ///     _ => panic!("unexpected import type!"),
@@ -649,13 +452,14 @@ impl Module {
     pub fn imports<'module>(
         &'module self,
     ) -> impl ExactSizeIterator<Item = ImportType<'module>> + 'module {
-        let module = self.compiled_module().module();
-        let types = self.types();
+        let module = self.compiled.module();
         module
-            .imports()
-            .map(move |(module, field, ty)| ImportType::new(module, field, ty, types))
-            .collect::<Vec<_>>()
-            .into_iter()
+            .imports
+            .iter()
+            .map(move |(module_name, name, entity_index)| {
+                let r#type = EntityType::new(entity_index, module);
+                ImportType::new(module_name, name, r#type)
+            })
     }
 
     /// Returns the list of exports that this [`Module`] has and will be
@@ -715,10 +519,10 @@ impl Module {
     pub fn exports<'module>(
         &'module self,
     ) -> impl ExactSizeIterator<Item = ExportType<'module>> + 'module {
-        let module = self.compiled_module().module();
-        let types = self.types();
+        let module = self.compiled.module();
         module.exports.iter().map(move |(name, entity_index)| {
-            ExportType::new(name, module.type_of(*entity_index), types)
+            let r#type = EntityType::new(entity_index, module);
+            ExportType::new(name, r#type)
         })
     }
 
@@ -766,18 +570,35 @@ impl Module {
     /// # }
     /// ```
     pub fn get_export<'module>(&'module self, name: &'module str) -> Option<ExternType> {
-        let module = self.compiled_module().module();
+        let module = self.compiled.module();
         let entity_index = module.exports.get(name)?;
-        Some(ExternType::from_wasmtime(
-            self.types(),
-            &module.type_of(*entity_index),
-        ))
+        Some(EntityType::new(entity_index, module).extern_type())
     }
 
     /// Returns the [`Engine`] that this [`Module`] was compiled by.
     pub fn engine(&self) -> &Engine {
-        &self.inner.engine
+        &self.engine
     }
+
+    /// Register this module's stack frame information into the global scope.
+    ///
+    /// This is required to ensure that any traps can be properly symbolicated.
+    pub(crate) fn register_frame_info(&self) -> Option<Arc<GlobalFrameInfoRegistration>> {
+        let mut info = self.frame_info_registration.lock().unwrap();
+        if let Some(info) = &*info {
+            return info.clone();
+        }
+        let ret = super::frame_info::register(&self.compiled).map(Arc::new);
+        *info = Some(ret.clone());
+        return ret;
+    }
+}
+
+fn compiler_fingerprint(config: &Config) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    config.compiler_fingerprint(&mut hasher);
+    hasher.finish()
 }
 
 fn _assert_send_sync() {

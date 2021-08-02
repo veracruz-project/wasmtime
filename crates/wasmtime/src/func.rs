@@ -1,142 +1,18 @@
+use crate::runtime::StoreInner;
 use crate::trampoline::StoreInstanceHandle;
-use crate::{Config, Extern, FuncType, Store, Trap, Val, ValType};
-use anyhow::{bail, Context as _, Result};
+use crate::{Extern, ExternRef, FuncType, Memory, Store, Trap, Val, ValType};
+use anyhow::{bail, ensure, Context as _, Result};
 use smallvec::{smallvec, SmallVec};
 use std::cmp::max;
 use std::fmt;
-use std::future::Future;
 use std::mem;
 use std::panic::{self, AssertUnwindSafe};
-use std::pin::Pin;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::Ordering::Relaxed;
-use wasmtime_environ::wasm::{EntityIndex, FuncIndex};
+use std::rc::Weak;
 use wasmtime_runtime::{
-    raise_user_trap, ExportFunction, InstanceAllocator, InstanceHandle, OnDemandInstanceAllocator,
-    VMCallerCheckedAnyfunc, VMContext, VMFunctionBody, VMFunctionImport, VMSharedSignatureIndex,
+    raise_user_trap, Export, InstanceHandle, VMContext, VMFunctionBody, VMSharedSignatureIndex,
     VMTrampoline,
 };
-
-/// Represents a host function.
-///
-/// This differs from `Func` in that it is not associated with a `Store`.
-/// Host functions are associated with a `Config`.
-pub(crate) struct HostFunc {
-    pub ty: FuncType,
-    pub instance: InstanceHandle,
-    pub trampoline: VMTrampoline,
-}
-
-impl HostFunc {
-    /// Creates a new host function from a callback.
-    ///
-    /// This is analogous to [`Func::new`].
-    pub fn new(
-        config: &Config,
-        ty: FuncType,
-        func: impl Fn(Caller<'_>, &[Val], &mut [Val]) -> Result<(), Trap> + Send + Sync + 'static,
-    ) -> Self {
-        let ty_clone = ty.clone();
-
-        // Create a trampoline that converts raw u128 values to `Val`
-        let func = Box::new(move |caller_vmctx, values_vec: *mut u128| {
-            // Lookup the last registered store as host functions have no associated store
-            let store = wasmtime_runtime::with_last_info(|last| {
-                last.and_then(|s| s.downcast_ref::<Store>())
-                    .cloned()
-                    .expect("Host function called without thread state")
-            });
-
-            Func::invoke(&store, &ty_clone, caller_vmctx, values_vec, &func)
-        });
-
-        let (instance, trampoline) = crate::trampoline::create_function(&ty, func, config, None)
-            .expect("failed to create host function");
-
-        Self {
-            ty,
-            instance,
-            trampoline,
-        }
-    }
-
-    /// Creates a new host function from wrapping a closure.
-    ///
-    /// This is analogous to [`Func::wrap`].
-    pub fn wrap<Params, Results>(func: impl IntoFunc<Params, Results> + Send + Sync) -> Self {
-        let (ty, instance, trampoline) = func.into_func(None);
-
-        Self {
-            ty,
-            instance,
-            trampoline,
-        }
-    }
-
-    /// Gets a caller-checked anyfunc for this host function given a shared signature index.
-    ///
-    /// The shared signature index must have been registered for the signature of
-    /// this host function.
-    pub fn anyfunc(&self, sig: VMSharedSignatureIndex) -> VMCallerCheckedAnyfunc {
-        let mut anyfunc = match self
-            .instance
-            .lookup_by_declaration(&EntityIndex::Function(FuncIndex::from_u32(0)))
-        {
-            wasmtime_runtime::Export::Function(f) => unsafe { f.anyfunc.as_ref() }.clone(),
-            _ => unreachable!(),
-        };
-
-        anyfunc.type_index = sig;
-        anyfunc
-    }
-
-    /// Converts a `HostFunc` to a `Func`.
-    ///
-    /// # Safety
-    ///
-    /// This is unsafe as the caller must ensure that the store's config defines this `HostFunc`.
-    pub unsafe fn to_func(&self, store: &Store) -> Func {
-        let instance = StoreInstanceHandle {
-            store: store.clone(),
-            // This clone of the instance handle should be safe because it should not be deallocated
-            // until all configs that reference it are dropped.
-            // A config will not drop until all stores referencing the config are dropped.
-            handle: self.instance.clone(),
-        };
-
-        let export = ExportFunction {
-            anyfunc: store
-                .engine()
-                .host_func_anyfunc(&self.instance)
-                .unwrap()
-                .into(),
-        };
-
-        Func {
-            instance,
-            trampoline: self.trampoline,
-            export,
-        }
-    }
-}
-
-impl Drop for HostFunc {
-    fn drop(&mut self) {
-        // Host functions are always allocated with the default (on-demand) allocator
-        unsafe { OnDemandInstanceAllocator::default().deallocate(&self.instance) }
-    }
-}
-
-// A note about thread safety of host function instance handles:
-// Host functions must be `Send+Sync` because `Module` must be `Send+Sync`.
-// However, the underlying runtime `Instance` is not `Send` or `Sync`.
-// For this to be safe, we must ensure that the runtime instance's state is not mutated for host functions.
-// Additionally, we add the `Send+Sync` bounds to `define_host_func` and `wrap_host_func` so
-// that the underlying closure stored in the instance's host state is safe to call from any thread.
-// Therefore, these impls should be safe because the underlying instance is not mutated and
-// the closures backing the host functions are required to be `Send+Sync`.
-unsafe impl Send for HostFunc {}
-unsafe impl Sync for HostFunc {}
 
 /// A WebAssembly function which can be called.
 ///
@@ -156,59 +32,6 @@ unsafe impl Sync for HostFunc {}
 /// Functions are internally reference counted so you can `clone` a `Func`. The
 /// cloning process only performs a shallow clone, so two cloned `Func`
 /// instances are equivalent in their functionality.
-///
-/// # `Func` and `async`
-///
-/// Functions from the perspective of WebAssembly are always synchronous. You
-/// might have an `async` function in Rust, however, which you'd like to make
-/// available from WebAssembly. Wasmtime supports asynchronously calling
-/// WebAssembly through native stack switching. You can get some more
-/// information about [asynchronous configs](Config::async_support), but from the
-/// perspective of `Func` it's important to know that whether or not your
-/// [`Store`] is asynchronous will dictate whether you call functions through
-/// [`Func::call`] or [`Func::call_async`] (or the typed wrappers such as
-/// [`TypedFunc::call`] vs [`TypedFunc::call_async`]).
-///
-/// Note that asynchronous function APIs here are a bit trickier than their
-/// synchronous brethren. For example [`Func::new_async`] and
-/// [`Func::wrapN_async`](Func::wrap1_async) take explicit state parameters to
-/// allow you to close over the state in the returned future. It's recommended
-/// that you pass state via these parameters instead of through the closure's
-/// environment, which may give Rust lifetime errors. Additionally unlike
-/// synchronous functions which can all get wrapped through [`Func::wrap`]
-/// asynchronous functions need to explicitly wrap based on the number of
-/// parameters that they have (e.g. no wasm parameters gives you
-/// [`Func::wrap0_async`], one wasm parameter you'd use [`Func::wrap1_async`],
-/// etc). Be sure to consult the documentation for [`Func::wrap`] for how the
-/// wasm type signature is inferred from the Rust type signature.
-///
-/// # To `Func::call` or to `Func::typed().call()`
-///
-/// There's a 2x2 matrix of methods to call `Func`. Invocations can either be
-/// asynchronous or synchronous. They can also be statically typed or not.
-/// Whether or not an invocation is asynchronous is indicated via the method
-/// being `async` and `call_async` being the entry point. Otherwise for
-/// statically typed or not your options are:
-///
-/// * Dynamically typed - if you don't statically know the signature of the
-///   function that you're calling you'll be using [`Func::call`] or
-///   [`Func::call_async`]. These functions take a variable-length slice of
-///   "boxed" arguments in their [`Val`] representation. Additionally the
-///   results are returned as an owned slice of [`Val`]. These methods are not
-///   optimized due to the dynamic type checks that must occur, in addition to
-///   some dynamic allocations for where to put all the arguments. While this
-///   allows you to call all possible wasm function signatures, if you're
-///   looking for a speedier alternative you can also use...
-///
-/// * Statically typed - if you statically know the type signature of the wasm
-///   function you're calling, then you'll want to use the [`Func::typed`]
-///   method to acquire an instance of [`TypedFunc`]. This structure is static proof
-///   that the underlying wasm function has the ascripted type, and type
-///   validation is only done once up-front. The [`TypedFunc::call`] and
-///   [`TypedFunc::call_async`] methods are much more efficient than [`Func::call`]
-///   and [`Func::call_async`] because the type signature is statically known.
-///   This eschews runtime checks as much as possible to get into wasm as fast
-///   as possible.
 ///
 /// # Examples
 ///
@@ -237,8 +60,8 @@ unsafe impl Sync for HostFunc {}
 /// // ... or we can make a static assertion about its signature and call it.
 /// // Our first call here can fail if the signatures don't match, and then the
 /// // second call can fail if the function traps (like the `match` above).
-/// let foo = foo.typed::<(), ()>()?;
-/// foo.call(())?;
+/// let foo = foo.get0::<()>()?;
+/// foo()?;
 /// # Ok(())
 /// # }
 /// ```
@@ -272,9 +95,10 @@ unsafe impl Sync for HostFunc {}
 ///     "#,
 /// )?;
 /// let instance = Instance::new(&store, &module, &[add.into()])?;
-/// let call_add_twice = instance.get_typed_func::<(), i32>("call_add_twice")?;
+/// let call_add_twice = instance.get_func("call_add_twice").expect("export wasn't a function");
+/// let call_add_twice = call_add_twice.get0::<i32>()?;
 ///
-/// assert_eq!(call_add_twice.call(())?, 10);
+/// assert_eq!(call_add_twice()?, 10);
 /// # Ok(())
 /// # }
 /// ```
@@ -289,8 +113,8 @@ unsafe impl Sync for HostFunc {}
 /// // Here we need to define the type signature of our `Double` function and
 /// // then wrap it up in a `Func`
 /// let double_type = wasmtime::FuncType::new(
-///     [wasmtime::ValType::I32].iter().cloned(),
-///     [wasmtime::ValType::I32].iter().cloned(),
+///     Box::new([wasmtime::ValType::I32]),
+///     Box::new([wasmtime::ValType::I32])
 /// );
 /// let double = Func::new(&store, double_type, |_, params, results| {
 ///     let mut value = params[0].unwrap_i32();
@@ -320,66 +144,90 @@ unsafe impl Sync for HostFunc {}
 pub struct Func {
     instance: StoreInstanceHandle,
     trampoline: VMTrampoline,
-    export: ExportFunction,
+    export: wasmtime_runtime::ExportFunction,
 }
 
-macro_rules! for_each_function_signature {
-    ($mac:ident) => {
-        $mac!(0);
-        $mac!(1 A1);
-        $mac!(2 A1 A2);
-        $mac!(3 A1 A2 A3);
-        $mac!(4 A1 A2 A3 A4);
-        $mac!(5 A1 A2 A3 A4 A5);
-        $mac!(6 A1 A2 A3 A4 A5 A6);
-        $mac!(7 A1 A2 A3 A4 A5 A6 A7);
-        $mac!(8 A1 A2 A3 A4 A5 A6 A7 A8);
-        $mac!(9 A1 A2 A3 A4 A5 A6 A7 A8 A9);
-        $mac!(10 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10);
-        $mac!(11 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11);
-        $mac!(12 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12);
-        $mac!(13 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13);
-        $mac!(14 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14);
-        $mac!(15 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14 A15);
-        $mac!(16 A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14 A15 A16);
-    };
-}
-
-mod typed;
-pub use typed::*;
-
-macro_rules! generate_wrap_async_func {
-    ($num:tt $($args:ident)*) => (paste::paste!{
-        /// Same as [`Func::wrap`], except the closure asynchronously produces
-        /// its result. For more information see the [`Func`] documentation.
-        ///
-        /// # Panics
-        ///
-        /// This function will panic if called with a non-asynchronous store.
+macro_rules! getters {
+    ($(
+        $(#[$doc:meta])*
+        ($name:ident $(,$args:ident)*)
+    )*) => ($(
+        $(#[$doc])*
         #[allow(non_snake_case)]
-        #[cfg(feature = "async")]
-        #[cfg_attr(nightlydoc, doc(cfg(feature = "async")))]
-        pub fn [<wrap $num _async>]<T, $($args,)* R>(
-            store: &Store,
-            state: T,
-            func: impl for<'a> Fn(Caller<'a>, &'a T, $($args),*) -> Box<dyn Future<Output = R> + 'a> + 'static,
-        ) -> Func
+        pub fn $name<$($args,)* R>(&self)
+            -> anyhow::Result<impl Fn($($args,)*) -> Result<R, Trap>>
         where
-            T: 'static,
             $($args: WasmTy,)*
-            R: WasmRet,
+            R: WasmTy,
         {
-            assert!(store.async_support(), concat!("cannot use `wrap", $num, "_async` without enabling async support on the config"));
-            Func::wrap(store, move |caller: Caller<'_>, $($args: $args),*| {
-                let store = caller.store().clone();
-                let mut future = Pin::from(func(caller, &state, $($args),*));
-                match store.block_on(future.as_mut()) {
-                    Ok(ret) => ret.into_fallible(),
-                    Err(e) => R::fallible_from_trap(e),
+            // Verify all the paramers match the expected parameters, and that
+            // there are no extra parameters...
+            let ty = self.ty();
+            let mut params = ty.params().iter().cloned();
+            let n = 0;
+            $(
+                let n = n + 1;
+                $args::matches(&mut params)
+                    .with_context(|| format!("Type mismatch in argument {}", n))?;
+            )*
+            ensure!(params.next().is_none(), "Type mismatch: too many arguments (expected {})", n);
+
+            // ... then do the same for the results...
+            let mut results = ty.results().iter().cloned();
+            R::matches(&mut results)
+                .context("Type mismatch in return type")?;
+            ensure!(results.next().is_none(), "Type mismatch: too many return values (expected 1)");
+
+            // Pass the instance into the closure so that we keep it live for
+            // the lifetime of the closure. Pass the `anyfunc` in so that we can
+            // call it.
+            let instance = self.instance.clone();
+            let anyfunc = self.export.anyfunc;
+
+            // ... and then once we've passed the typechecks we can hand out our
+            // object since our `transmute` below should be safe!
+            Ok(move |$($args: $args),*| -> Result<R, Trap> {
+                unsafe {
+                    let fnptr = mem::transmute::<
+                        *const VMFunctionBody,
+                        unsafe extern "C" fn(
+                            *mut VMContext,
+                            *mut VMContext,
+                            $( $args::Abi, )*
+                        ) -> R::Abi,
+                    >(anyfunc.as_ref().func_ptr.as_ptr());
+
+                    let mut ret = None;
+
+                    let weak_store = instance.store.weak();
+                    let weak_store = WeakStore(&weak_store);
+
+                    $(
+                        // Because this returned closure is not marked `unsafe`,
+                        // we have to check that incoming values are compatible
+                        // with our store.
+                        if !$args.compatible_with_store(weak_store) {
+                            return Err(Trap::new(
+                                "attempt to pass cross-`Store` value to Wasm as function argument"
+                            ));
+                        }
+
+                        let $args = $args.into_abi_for_arg(weak_store);
+                    )*
+
+                    invoke_wasm_and_catch_traps(anyfunc.as_ref().vmctx, &instance.store, || {
+                        ret = Some(fnptr(
+                            anyfunc.as_ref().vmctx,
+                            ptr::null_mut(),
+                            $( $args, )*
+                        ));
+                    })?;
+
+                    Ok(R::from_abi(ret.unwrap(), weak_store))
                 }
             })
         }
-    })
+    )*)
 }
 
 impl Func {
@@ -411,32 +259,58 @@ impl Func {
         ty: FuncType,
         func: impl Fn(Caller<'_>, &[Val], &mut [Val]) -> Result<(), Trap> + 'static,
     ) -> Self {
+        let store_weak = store.weak();
         let ty_clone = ty.clone();
 
-        // Create a trampoline that converts raw u128 values to `Val`
+        // Create our actual trampoline function which translates from a bunch
+        // of bit patterns on the stack to actual instances of `Val` being
+        // passed to the given function.
         let func = Box::new(move |caller_vmctx, values_vec: *mut u128| {
-            // Lookup the last registered store as host functions have no associated store
-            let store = wasmtime_runtime::with_last_info(|last| {
-                last.and_then(|s| s.downcast_ref::<Store>())
-                    .cloned()
-                    .expect("function called without thread state")
-            });
-
-            Func::invoke(&store, &ty_clone, caller_vmctx, values_vec, &func)
-        });
-
-        let (instance, trampoline) =
-            crate::trampoline::create_function(&ty, func, store.engine().config(), Some(store))
-                .expect("failed to create function");
-
-        let idx = EntityIndex::Function(FuncIndex::from_u32(0));
-        let (instance, export) = match instance.lookup_by_declaration(&idx) {
-            wasmtime_runtime::Export::Function(f) => {
-                (unsafe { store.add_instance(instance, true) }, f)
+            // We have a dynamic guarantee that `values_vec` has the right
+            // number of arguments and the right types of arguments. As a result
+            // we should be able to safely run through them all and read them.
+            const STACK_ARGS: usize = 4;
+            const STACK_RETURNS: usize = 2;
+            let mut args: SmallVec<[Val; STACK_ARGS]> =
+                SmallVec::with_capacity(ty_clone.params().len());
+            let store = Store::upgrade(&store_weak).unwrap();
+            for (i, ty) in ty_clone.params().iter().enumerate() {
+                unsafe {
+                    let val = Val::read_value_from(&store, values_vec.add(i), ty);
+                    args.push(val);
+                }
             }
-            _ => unreachable!(),
-        };
 
+            let mut returns: SmallVec<[Val; STACK_RETURNS]> =
+                smallvec![Val::null(); ty_clone.results().len()];
+
+            func(
+                Caller {
+                    store: &store_weak,
+                    caller_vmctx,
+                },
+                &args,
+                &mut returns,
+            )?;
+
+            // Unlike our arguments we need to dynamically check that the return
+            // values produced are correct. There could be a bug in `func` that
+            // produces the wrong number or wrong types of values, and we need
+            // to catch that here.
+            for (i, (ret, ty)) in returns.into_iter().zip(ty_clone.results()).enumerate() {
+                if ret.ty() != *ty {
+                    return Err(Trap::new(
+                        "function attempted to return an incompatible value",
+                    ));
+                }
+                unsafe {
+                    ret.write_value_to(&store, values_vec.add(i));
+                }
+            }
+            Ok(())
+        });
+        let (instance, export, trampoline) =
+            crate::trampoline::generate_func_export(&ty, func, store).expect("generated func");
         Func {
             instance,
             trampoline,
@@ -444,111 +318,19 @@ impl Func {
         }
     }
 
-    /// Creates a new host-defined WebAssembly function which, when called,
-    /// will run the asynchronous computation defined by `func` to completion
-    /// and then return the result to WebAssembly.
-    ///
-    /// This function is the asynchronous analogue of [`Func::new`] and much of
-    /// that documentation applies to this as well. There are a few key
-    /// differences (besides being asynchronous) that are worth pointing out:
-    ///
-    /// * The state parameter `T` is passed to the provided function `F` on
-    ///   each invocation. This is done so you can use the state in `T` in the
-    ///   computation of the output future (the future can close over this
-    ///   value). Unfortunately due to limitations of async-in-Rust right now
-    ///   you **cannot** close over the captured variables in `F` itself in the
-    ///   returned future. This means that you likely won't close over much
-    ///   state in `F` and will instead use `T`.
-    ///
-    /// * The closure here returns a *boxed* future, not something that simply
-    ///   implements a future. This is also unfortunately due to limitations in
-    ///   Rust right now.
-    ///
-    /// Overall we're not super happy with this API signature and would love to
-    /// change it to make it more ergonomic. Despite this, however, you should
-    /// be able to still hook into asynchronous computations and plug them into
-    /// wasm. Improvements are always welcome with PRs!
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if `store` is not associated with an [async
-    /// config](Config::async_support).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use wasmtime::*;
-    /// # fn main() -> anyhow::Result<()> {
-    /// // Simulate some application-specific state as well as asynchronous
-    /// // functions to query that state.
-    /// struct MyDatabase {
-    ///     // ...
-    /// }
-    ///
-    /// impl MyDatabase {
-    ///     async fn get_row_count(&self) -> u32 {
-    ///         // ...
-    /// #       100
-    ///     }
-    /// }
-    ///
-    /// let my_database = MyDatabase {
-    ///     // ...
-    /// };
-    ///
-    /// // Using `new_async` we can hook up into calling our async
-    /// // `get_row_count` function.
-    /// let store = Store::new(&Engine::new(Config::new().async_support(true))?);
-    /// let get_row_count_type = wasmtime::FuncType::new(
-    ///     None,
-    ///     Some(wasmtime::ValType::I32),
-    /// );
-    /// let double = Func::new_async(&store, get_row_count_type, my_database, |_, database, params, results| {
-    ///     Box::new(async move {
-    ///         let count = database.get_row_count().await;
-    ///         results[0] = Val::I32(count as i32);
-    ///         Ok(())
-    ///     })
-    /// });
-    /// // ...
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(feature = "async")]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "async")))]
-    pub fn new_async<T, F>(store: &Store, ty: FuncType, state: T, func: F) -> Func
-    where
-        T: 'static,
-        F: for<'a> Fn(
-                Caller<'a>,
-                &'a T,
-                &'a [Val],
-                &'a mut [Val],
-            ) -> Box<dyn Future<Output = Result<(), Trap>> + 'a>
-            + 'static,
-    {
-        assert!(
-            store.async_support(),
-            "cannot use `new_async` without enabling async support in the config"
-        );
-        Func::new(store, ty, move |caller, params, results| {
-            let store = caller.store().clone();
-            let mut future = Pin::from(func(caller, &state, params, results));
-            match store.block_on(future.as_mut()) {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(trap)) | Err(trap) => Err(trap),
-            }
-        })
-    }
-
     pub(crate) unsafe fn from_caller_checked_anyfunc(
         store: &Store,
-        anyfunc: *mut VMCallerCheckedAnyfunc,
+        anyfunc: *mut wasmtime_runtime::VMCallerCheckedAnyfunc,
     ) -> Option<Self> {
         let anyfunc = NonNull::new(anyfunc)?;
-        debug_assert!(anyfunc.as_ref().type_index != VMSharedSignatureIndex::default());
-        let export = ExportFunction { anyfunc };
-        let f = Func::from_wasmtime_function(&export, store);
+        debug_assert!(
+            anyfunc.as_ref().type_index != wasmtime_runtime::VMSharedSignatureIndex::default()
+        );
+
+        let instance_handle = wasmtime_runtime::InstanceHandle::from_vmctx(anyfunc.as_ref().vmctx);
+        let export = wasmtime_runtime::ExportFunction { anyfunc };
+        let instance = store.existing_instance_handle(instance_handle);
+        let f = Func::from_wasmtime_function(export, instance);
         Some(f)
     }
 
@@ -574,20 +356,20 @@ impl Func {
     /// Any of the Rust types can be returned from the closure as well, in
     /// addition to some extra types
     ///
-    /// | Rust Return Type  | WebAssembly Return Type | Meaning               |
-    /// |-------------------|-------------------------|-----------------------|
-    /// | `()`              | nothing                 | no return value       |
-    /// | `T`               | `T`                     | a single return value |
-    /// | `(T1, T2, ...)`   | `T1 T2 ...`             | multiple returns      |
+    /// | Rust Return Type  | WebAssembly Return Type | Meaning           |
+    /// |-------------------|-------------------------|-------------------|
+    /// | `()`              | nothing                 | no return value   |
+    /// | `Result<T, Trap>` | `T`                     | function may trap |
     ///
-    /// Note that all return types can also be wrapped in `Result<_, Trap>` to
-    /// indicate that the host function can generate a trap as well as possibly
-    /// returning a value.
+    /// At this time multi-value returns are not supported, and supporting this
+    /// is the subject of [#1178].
+    ///
+    /// [#1178]: https://github.com/bytecodealliance/wasmtime/issues/1178
     ///
     /// Finally you can also optionally take [`Caller`] as the first argument of
     /// your closure. If inserted then you're able to inspect the caller's
-    /// state, for example the [`Memory`](crate::Memory) it has exported so you
-    /// can read what pointers point to.
+    /// state, for example the [`Memory`] it has exported so you can read what
+    /// pointers point to.
     ///
     /// Note that when using this API, the intention is to create as thin of a
     /// layer as possible for when WebAssembly calls the function provided. With
@@ -616,8 +398,8 @@ impl Func {
     ///     "#,
     /// )?;
     /// let instance = Instance::new(&store, &module, &[add.into()])?;
-    /// let foo = instance.get_typed_func::<(i32, i32), i32>("foo")?;
-    /// assert_eq!(foo.call((1, 2))?, 3);
+    /// let foo = instance.get_func("foo").unwrap().get2::<i32, i32, i32>()?;
+    /// assert_eq!(foo(1, 2)?, 3);
     /// # Ok(())
     /// # }
     /// ```
@@ -647,9 +429,9 @@ impl Func {
     ///     "#,
     /// )?;
     /// let instance = Instance::new(&store, &module, &[add.into()])?;
-    /// let foo = instance.get_typed_func::<(i32, i32), i32>("foo")?;
-    /// assert_eq!(foo.call((1, 2))?, 3);
-    /// assert!(foo.call((i32::max_value(), 1)).is_err());
+    /// let foo = instance.get_func("foo").unwrap().get2::<i32, i32, i32>()?;
+    /// assert_eq!(foo(1, 2)?, 3);
+    /// assert!(foo(i32::max_value(), 1).is_err());
     /// # Ok(())
     /// # }
     /// ```
@@ -685,8 +467,8 @@ impl Func {
     ///     "#,
     /// )?;
     /// let instance = Instance::new(&store, &module, &[debug.into()])?;
-    /// let foo = instance.get_typed_func::<(), ()>("foo")?;
-    /// foo.call(())?;
+    /// let foo = instance.get_func("foo").unwrap().get0::<()>()?;
+    /// foo()?;
     /// # Ok(())
     /// # }
     /// ```
@@ -741,30 +523,14 @@ impl Func {
     ///     "#,
     /// )?;
     /// let instance = Instance::new(&store, &module, &[log_str.into()])?;
-    /// let foo = instance.get_typed_func::<(), ()>("foo")?;
-    /// foo.call(())?;
+    /// let foo = instance.get_func("foo").unwrap().get0::<()>()?;
+    /// foo()?;
     /// # Ok(())
     /// # }
     /// ```
     pub fn wrap<Params, Results>(store: &Store, func: impl IntoFunc<Params, Results>) -> Func {
-        let (_, instance, trampoline) = func.into_func(Some(store));
-
-        let (instance, export) = unsafe {
-            let idx = EntityIndex::Function(FuncIndex::from_u32(0));
-            match instance.lookup_by_declaration(&idx) {
-                wasmtime_runtime::Export::Function(f) => (store.add_instance(instance, true), f),
-                _ => unreachable!(),
-            }
-        };
-
-        Func {
-            instance,
-            export,
-            trampoline,
-        }
+        func.into_func(store)
     }
-
-    for_each_function_signature!(generate_wrap_async_func);
 
     pub(crate) fn sig_index(&self) -> VMSharedSignatureIndex {
         unsafe { self.export.anyfunc.as_ref().type_index }
@@ -772,26 +538,32 @@ impl Func {
 
     /// Returns the underlying wasm type that this `Func` has.
     pub fn ty(&self) -> FuncType {
-        // Signatures should always be registered in the engine's registry of
+        // Signatures should always be registered in the store's registry of
         // shared signatures, so we should be able to unwrap safely here.
-        FuncType::from_wasm_func_type(
-            self.instance
-                .store
-                .engine()
-                .signatures()
-                .lookup_type(self.sig_index())
-                .expect("signature should be registered"),
-        )
+        let wft = self.instance.store.lookup_signature(self.sig_index());
+
+        // This is only called with `Export::Function`, and since it's coming
+        // from wasmtime_runtime itself we should support all the types coming
+        // out of it, so assert such here.
+        FuncType::from_wasm_func_type(&wft)
     }
 
     /// Returns the number of parameters that this function takes.
     pub fn param_arity(&self) -> usize {
-        self.ty().params().len()
+        let sig = self
+            .instance
+            .store
+            .lookup_signature(unsafe { self.export.anyfunc.as_ref().type_index });
+        sig.params.len()
     }
 
     /// Returns the number of results this function produces.
     pub fn result_arity(&self) -> usize {
-        self.ty().results().len()
+        let sig = self
+            .instance
+            .store
+            .lookup_signature(unsafe { self.export.anyfunc.as_ref().type_index });
+        sig.returns.len()
     }
 
     /// Invokes this function with the `params` given, returning the results and
@@ -801,52 +573,9 @@ impl Func {
     /// trap will occur. If a trap occurs while executing this function, then a
     /// trap will also be returned.
     ///
-    /// # Panics
-    ///
-    /// This function will panic if called on a function belonging to an async
-    /// store. Asynchronous stores must always use `call_async`.
+    /// This function should not panic unless the underlying function itself
     /// initiates a panic.
     pub fn call(&self, params: &[Val]) -> Result<Box<[Val]>> {
-        assert!(
-            !cfg!(feature = "async") || !self.store().async_support(),
-            "must use `call_async` when async support is enabled on the config",
-        );
-        self._call(params)
-    }
-
-    /// Invokes this function with the `params` given, returning the results
-    /// asynchronously.
-    ///
-    /// This function is the same as [`Func::call`] except that it is
-    /// asynchronous. This is only compatible with stores associated with an
-    /// [asynchronous config](Config::async_support).
-    ///
-    /// It's important to note that the execution of WebAssembly will happen
-    /// synchronously in the `poll` method of the future returned from this
-    /// function. Wasmtime does not manage its own thread pool or similar to
-    /// execute WebAssembly in. Future `poll` methods are generally expected to
-    /// resolve quickly, so it's recommended that you run or poll this future
-    /// in a "blocking context".
-    ///
-    /// For more information see the documentation on [asynchronous
-    /// configs](Config::async_support).
-    ///
-    /// # Panics
-    ///
-    /// Panics if this is called on a function in a synchronous store. This
-    /// only works with functions defined within an asynchronous store.
-    #[cfg(feature = "async")]
-    #[cfg_attr(nightlydoc, doc(cfg(feature = "async")))]
-    pub async fn call_async(&self, params: &[Val]) -> Result<Box<[Val]>> {
-        assert!(
-            self.store().async_support(),
-            "cannot use `call_async` without enabling async support in the config",
-        );
-        let result = self.store().on_fiber(|| self._call(params)).await??;
-        Ok(result)
-    }
-
-    fn _call(&self, params: &[Val]) -> Result<Box<[Val]>> {
         // We need to perform a dynamic check that the arguments given to us
         // match the signature of this function and are appropriate to pass to
         // this function. This involves checking to make sure we have the right
@@ -864,9 +593,9 @@ impl Func {
         let mut values_vec = vec![0; max(params.len(), my_ty.results().len())];
 
         // Store the argument values into `values_vec`.
-        let param_tys = my_ty.params();
+        let param_tys = my_ty.params().iter();
         for ((arg, slot), ty) in params.iter().cloned().zip(&mut values_vec).zip(param_tys) {
-            if arg.ty() != ty {
+            if arg.ty() != *ty {
                 bail!(
                     "argument type mismatch: found {} but expected {}",
                     arg.ty(),
@@ -884,7 +613,7 @@ impl Func {
         // Call the trampoline.
         unsafe {
             let anyfunc = self.export.anyfunc.as_ref();
-            invoke_wasm_and_catch_traps(&self.instance.store, || {
+            invoke_wasm_and_catch_traps(anyfunc.vmctx, &self.instance.store, || {
                 (self.trampoline)(
                     anyfunc.vmctx,
                     ptr::null_mut(),
@@ -896,7 +625,7 @@ impl Func {
 
         // Load the return values out of `values_vec`.
         let mut results = Vec::with_capacity(my_ty.results().len());
-        for (index, ty) in my_ty.results().enumerate() {
+        for (index, ty) in my_ty.results().iter().enumerate() {
             unsafe {
                 let ptr = values_vec.as_ptr().add(index);
                 results.push(Val::read_value_from(&self.instance.store, ptr, ty));
@@ -906,237 +635,169 @@ impl Func {
         Ok(results.into())
     }
 
-    pub(crate) fn caller_checked_anyfunc(&self) -> NonNull<VMCallerCheckedAnyfunc> {
+    pub(crate) fn caller_checked_anyfunc(
+        &self,
+    ) -> NonNull<wasmtime_runtime::VMCallerCheckedAnyfunc> {
         self.export.anyfunc
     }
 
-    pub(crate) unsafe fn from_wasmtime_function(export: &ExportFunction, store: &Store) -> Self {
-        let anyfunc = export.anyfunc.as_ref();
+    pub(crate) fn from_wasmtime_function(
+        export: wasmtime_runtime::ExportFunction,
+        instance: StoreInstanceHandle,
+    ) -> Self {
+        // Each function signature in a module should have a trampoline stored
+        // on that module as well, so unwrap the result here since otherwise
+        // it's a bug in wasmtime.
+        let trampoline = instance
+            .trampoline(unsafe { export.anyfunc.as_ref().type_index })
+            .expect("failed to retrieve trampoline from module");
 
         Func {
-            instance: store.existing_vmctx(anyfunc.vmctx),
-            export: export.clone(),
-            trampoline: store.lookup_trampoline(&*anyfunc),
+            instance,
+            export,
+            trampoline,
         }
     }
 
+    getters! {
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get0)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// This function serves as an optimized version of the [`Func::call`]
+        /// method if the type signature of a function is statically known to
+        /// the program. This method is faster than `call` on a few metrics:
+        ///
+        /// * Runtime type-checking only happens once, when this method is
+        ///   called.
+        /// * The result values, if any, aren't boxed into a vector.
+        /// * Arguments and return values don't go through boxing and unboxing.
+        /// * No trampolines are used to transfer control flow to/from JIT code,
+        ///   instead this function jumps directly into JIT code.
+        ///
+        /// For more information about which Rust types match up to which wasm
+        /// types, see the documentation on [`Func::wrap`].
+        ///
+        /// # Return
+        ///
+        /// This function will return `None` if the type signature asserted
+        /// statically does not match the runtime type signature. `Some`,
+        /// however, will be returned if the underlying function takes one
+        /// parameter of type `A` and returns the parameter `R`. Currently `R`
+        /// can either be `()` (no return values) or one wasm type. At this time
+        /// a multi-value return isn't supported.
+        ///
+        /// The returned closure will always return a `Result<R, Trap>` and an
+        /// `Err` is returned if a trap happens while the wasm is executing.
+        (get1, A1)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get2, A1, A2)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get3, A1, A2, A3)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get4, A1, A2, A3, A4)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get5, A1, A2, A3, A4, A5)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get6, A1, A2, A3, A4, A5, A6)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get7, A1, A2, A3, A4, A5, A6, A7)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get8, A1, A2, A3, A4, A5, A6, A7, A8)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get9, A1, A2, A3, A4, A5, A6, A7, A8, A9)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get10, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get11, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get12, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get13, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get14, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14)
+
+        /// Extracts a natively-callable object from this `Func`, if the
+        /// signature matches.
+        ///
+        /// See the [`Func::get1`] method for more documentation.
+        (get15, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15)
+    }
+
     /// Get a reference to this function's store.
-    #[inline]
     pub fn store(&self) -> &Store {
         &self.instance.store
     }
 
-    pub(crate) fn vmimport(&self) -> VMFunctionImport {
+    pub(crate) fn matches_expected(&self, expected: VMSharedSignatureIndex) -> bool {
+        self.sig_index() == expected
+    }
+
+    pub(crate) fn vmimport(&self) -> wasmtime_runtime::VMFunctionImport {
         unsafe {
             let f = self.caller_checked_anyfunc();
-            VMFunctionImport {
+            wasmtime_runtime::VMFunctionImport {
                 body: f.as_ref().func_ptr,
                 vmctx: f.as_ref().vmctx,
             }
         }
-    }
-
-    pub(crate) fn wasmtime_export(&self) -> &ExportFunction {
-        &self.export
-    }
-
-    fn invoke(
-        store: &Store,
-        ty: &FuncType,
-        caller_vmctx: *mut VMContext,
-        values_vec: *mut u128,
-        func: &dyn Fn(Caller<'_>, &[Val], &mut [Val]) -> Result<(), Trap>,
-    ) -> Result<(), Trap> {
-        // We have a dynamic guarantee that `values_vec` has the right
-        // number of arguments and the right types of arguments. As a result
-        // we should be able to safely run through them all and read them.
-        const STACK_ARGS: usize = 4;
-        const STACK_RETURNS: usize = 2;
-        let mut args: SmallVec<[Val; STACK_ARGS]> = SmallVec::with_capacity(ty.params().len());
-        for (i, ty) in ty.params().enumerate() {
-            unsafe {
-                let val = Val::read_value_from(store, values_vec.add(i), ty);
-                args.push(val);
-            }
-        }
-
-        let mut returns: SmallVec<[Val; STACK_RETURNS]> =
-            smallvec![Val::null(); ty.results().len()];
-
-        func(
-            Caller {
-                store,
-                caller_vmctx,
-            },
-            &args,
-            &mut returns,
-        )?;
-
-        // Unlike our arguments we need to dynamically check that the return
-        // values produced are correct. There could be a bug in `func` that
-        // produces the wrong number, wrong types, or wrong stores of
-        // values, and we need to catch that here.
-        for (i, (ret, ty)) in returns.into_iter().zip(ty.results()).enumerate() {
-            if ret.ty() != ty {
-                return Err(Trap::new(
-                    "function attempted to return an incompatible value",
-                ));
-            }
-            if !ret.comes_from_same_store(store) {
-                return Err(Trap::new(
-                    "cross-`Store` values are not currently supported",
-                ));
-            }
-            unsafe {
-                ret.write_value_to(store, values_vec.add(i));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Attempts to extract a typed object from this `Func` through which the
-    /// function can be called.
-    ///
-    /// This function serves as an alternative to [`Func::call`] and
-    /// [`Func::call_async`]. This method performs a static type check (using
-    /// the `Params` and `Results` type parameters on the underlying wasm
-    /// function. If the type check passes then a `TypedFunc` object is returned,
-    /// otherwise an error is returned describing the typecheck failure.
-    ///
-    /// The purpose of this relative to [`Func::call`] is that it's much more
-    /// efficient when used to invoke WebAssembly functions. With the types
-    /// statically known far less setup/teardown is required when invoking
-    /// WebAssembly. If speed is desired then this function is recommended to be
-    /// used instead of [`Func::call`] (which is more general, hence its
-    /// slowdown).
-    ///
-    /// The `Params` type parameter is used to describe the parameters of the
-    /// WebAssembly function. This can either be a single type (like `i32`), or
-    /// a tuple of types representing the list of parameters (like `(i32, f32,
-    /// f64)`). Additionally you can use `()` to represent that the function has
-    /// no parameters.
-    ///
-    /// The `Results` type parameter is used to describe the results of the
-    /// function. This behaves the same way as `Params`, but just for the
-    /// results of the function.
-    ///
-    /// Translation between Rust types and WebAssembly types looks like:
-    ///
-    /// | WebAssembly | Rust                |
-    /// |-------------|---------------------|
-    /// | `i32`       | `i32` or `u32`      |
-    /// | `i64`       | `i64` or `u64`      |
-    /// | `f32`       | `f32`               |
-    /// | `f64`       | `f64`               |
-    /// | `externref` | `Option<ExternRef>` |
-    /// | `funcref`   | `Option<Func>`      |
-    /// | `v128`      | not supported       |
-    ///
-    /// (note that this mapping is the same as that of [`Func::wrap`]).
-    ///
-    /// Note that once the [`TypedFunc`] return value is acquired you'll use either
-    /// [`TypedFunc::call`] or [`TypedFunc::call_async`] as necessary to actually invoke
-    /// the function. This method does not invoke any WebAssembly code, it
-    /// simply performs a typecheck before returning the [`TypedFunc`] value.
-    ///
-    /// This method also has a convenience wrapper as
-    /// [`Instance::get_typed_func`](crate::Instance::get_typed_func) to
-    /// directly get a typed function value from an
-    /// [`Instance`](crate::Instance).
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if `Params` or `Results` does not
-    /// match the native type of this WebAssembly function.
-    ///
-    /// # Examples
-    ///
-    /// An end-to-end example of calling a function which takes no parameters
-    /// and has no results:
-    ///
-    /// ```
-    /// # use wasmtime::*;
-    /// # fn main() -> anyhow::Result<()> {
-    /// let engine = Engine::default();
-    /// let store = Store::new(&engine);
-    /// let module = Module::new(&engine, r#"(module (func (export "foo")))"#)?;
-    /// let instance = Instance::new(&store, &module, &[])?;
-    /// let foo = instance.get_func("foo").expect("export wasn't a function");
-    ///
-    /// // Note that this call can fail due to the typecheck not passing, but
-    /// // in our case we statically know the module so we know this should
-    /// // pass.
-    /// let typed = foo.typed::<(), ()>()?;
-    ///
-    /// // Note that this can fail if the wasm traps at runtime.
-    /// typed.call(())?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// You can also pass in multiple parameters and get a result back
-    ///
-    /// ```
-    /// # use wasmtime::*;
-    /// # fn foo(add: &Func) -> anyhow::Result<()> {
-    /// let typed = add.typed::<(i32, i64), f32>()?;
-    /// assert_eq!(typed.call((1, 2))?, 3.0);
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// and similarly if a function has multiple results you can bind that too
-    ///
-    /// ```
-    /// # #[cfg(not(feature = "old-x86-backend"))]
-    /// # use wasmtime::*;
-    /// # #[cfg(not(feature = "old-x86-backend"))]
-    /// # fn foo(add_with_overflow: &Func) -> anyhow::Result<()> {
-    /// let typed = add_with_overflow.typed::<(u32, u32), (u32, i32)>()?;
-    /// let (result, overflow) = typed.call((u32::max_value(), 2))?;
-    /// assert_eq!(result, 1);
-    /// assert_eq!(overflow, 1);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn typed<Params, Results>(&self) -> Result<&TypedFunc<Params, Results>>
-    where
-        Params: WasmParams,
-        Results: WasmResults,
-    {
-        // First type-check that the params/results are all valid...
-        let ty = self.ty();
-        Params::typecheck(ty.params()).context("type mismatch with parameters")?;
-        Results::typecheck(ty.results()).context("type mismatch with results")?;
-
-        // ... then we can construct the typed version of this function
-        // (unsafely), which should be safe since we just did the type check above.
-        unsafe { Ok(self.typed_unchecked::<Params, Results>()) }
-    }
-
-    /// An unchecked version of [`Func::typed`] which does not perform a
-    /// typecheck and simply assumes that the type declared here matches the
-    /// type of this function.
-    ///
-    /// The semantics of this function are the same as [`Func::typed`] except
-    /// that no error is returned because no typechecking is done.
-    ///
-    /// # Unsafety
-    ///
-    /// This function only safe to call if `typed` would otherwise return `Ok`
-    /// for the same `Params` and `Results` specified. If `typed` would return
-    /// an error then the returned `TypedFunc` is memory unsafe to invoke.
-    pub unsafe fn typed_unchecked<Params, Results>(&self) -> &TypedFunc<Params, Results>
-    where
-        Params: WasmParams,
-        Results: WasmResults,
-    {
-        assert_eq!(
-            mem::size_of::<TypedFunc<Params, Results>>(),
-            mem::size_of_val(self)
-        );
-        &*(self as *const Func as *const TypedFunc<Params, Results>)
     }
 }
 
@@ -1146,107 +807,81 @@ impl fmt::Debug for Func {
     }
 }
 
-#[inline]
 pub(crate) fn invoke_wasm_and_catch_traps(
+    vmctx: *mut VMContext,
     store: &Store,
     closure: impl FnMut(),
 ) -> Result<(), Trap> {
+    let signalhandler = store.signal_handler();
     unsafe {
-        let _reset = if store.externref_activations_table().stack_canary().is_some() {
-            None
-        } else {
-            Some(enter_wasm_init(store)?)
-        };
+        let canary = 0;
+        let _auto_reset_canary = store
+            .externref_activations_table()
+            .set_stack_canary(&canary);
 
-        wasmtime_runtime::catch_traps(store, closure).map_err(|e| Trap::from_runtime(store, e))
+        wasmtime_runtime::catch_traps(
+            vmctx,
+            store.engine().config().max_wasm_stack,
+            |addr| store.is_in_jit_code(addr),
+            signalhandler.as_deref(),
+            closure,
+        )
+        .map_err(Trap::from_runtime)
     }
 }
 
-/// This function is called to register state within `Store` whenever
-/// WebAssembly is entered for the first time within the `Store`. This isn't
-/// called when wasm is called recursively within the `Store`.
-///
-/// This function sets up various limits such as:
-///
-/// * The stack limit. This is what ensures that we limit the stack space
-///   allocated by WebAssembly code and it's relative to the initial stack
-///   pointer that called into wasm.
-///
-/// * Stack canaries for externref gc tracing. Currently the implementation
-///   relies on walking frames but the stack walker isn't always 100% reliable,
-///   so a canary is used to ensure that if the canary is seen then it's
-///   guaranteed all wasm frames have been walked.
-///
-/// This function may fail if the the stack limit can't be set because an
-/// interrupt already happened. Otherwise it returns a value that resets the
-/// various limits on `Drop`.
-#[inline]
-fn enter_wasm_init<'a>(store: &'a Store) -> Result<impl Drop + 'a, Trap> {
-    let stack_pointer = psm::stack_pointer() as usize;
+// Public (but hidden) wrapper around a `Weak<StoreInner>` so that we can use it
+// in public (but hidden) trait methods.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct WeakStore<'a>(&'a Weak<StoreInner>);
 
-    // Determine the stack pointer where, after which, any wasm code will
-    // immediately trap. This is checked on the entry to all wasm functions.
+/// A trait implemented for types which can be arguments to closures passed to
+/// [`Func::wrap`] and friends.
+///
+/// This trait should not be implemented by user types. This trait may change at
+/// any time internally. The types which implement this trait, however, are
+/// stable over time.
+///
+/// For more information see [`Func::wrap`]
+pub unsafe trait WasmTy {
+    // The raw ABI representation of this type inside Wasm.
+    #[doc(hidden)]
+    type Abi: Copy;
+
+    // Is this value compatible with the given store?
+    #[doc(hidden)]
+    fn compatible_with_store<'a>(&self, store: WeakStore<'a>) -> bool;
+
+    // Convert this value into its ABI representation, when passing a value into
+    // Wasm as an argument.
+    #[doc(hidden)]
+    fn into_abi_for_arg<'a>(self, store: WeakStore<'a>) -> Self::Abi;
+
+    // Convert from the raw ABI representation back into `Self`, when receiving
+    // a value from Wasm.
     //
-    // Note that this isn't 100% precise. We are requested to give wasm
-    // `max_wasm_stack` bytes, but what we're actually doing is giving wasm
-    // probably a little less than `max_wasm_stack` because we're
-    // calculating the limit relative to this function's approximate stack
-    // pointer. Wasm will be executed on a frame beneath this one (or next
-    // to it). In any case it's expected to be at most a few hundred bytes
-    // of slop one way or another. When wasm is typically given a MB or so
-    // (a million bytes) the slop shouldn't matter too much.
-    //
-    // After we've got the stack limit then we store it into the `stack_limit`
-    // variable. Note that the store is an atomic swap to ensure that we can
-    // consume any previously-sent interrupt requests. If we found that wasm was
-    // previously interrupted then we immediately return a trap (after resetting
-    // the stack limit). Otherwise we're good to keep on going.
-    //
-    // Note the usage of `Relaxed` memory orderings here. This is specifically
-    // an optimization in the `Drop` below where a `Relaxed` store is speedier
-    // than a `SeqCst` store. The rationale for `Relaxed` here is that the
-    // atomic orderings here aren't actually protecting any memory, we're just
-    // trying to be atomic with respect to this one location in memory (for when
-    // `InterruptHandle` sends us a signal). Due to the lack of needing to
-    // synchronize with any other memory it's hoped that the choice of `Relaxed`
-    // here should be correct for our use case.
-    let wasm_stack_limit = stack_pointer - store.engine().config().max_wasm_stack;
-    let interrupts = store.interrupts();
-    match interrupts.stack_limit.swap(wasm_stack_limit, Relaxed) {
-        wasmtime_environ::INTERRUPTED => {
-            // This means that an interrupt happened before we actually
-            // called this function, which means that we're now
-            // considered interrupted.
-            interrupts.stack_limit.store(usize::max_value(), Relaxed);
-            return Err(Trap::new_wasm(
-                Some(store),
-                None,
-                wasmtime_environ::ir::TrapCode::Interrupt,
-                backtrace::Backtrace::new_unresolved(),
-            ));
-        }
-        n => debug_assert_eq!(usize::max_value(), n),
-    }
-    store
-        .externref_activations_table()
-        .set_stack_canary(Some(stack_pointer));
+    // Safety: The abi value *must* have be valid for this type (e.g. for
+    // `externref`, it must be a valid raw `VMExternRef` pointer, not some
+    // random, dangling pointer).
+    #[doc(hidden)]
+    unsafe fn from_abi<'a>(abi: Self::Abi, store: WeakStore<'a>) -> Self;
 
-    return Ok(Reset(store));
+    // Add this type to the given vec of expected valtypes.
+    #[doc(hidden)]
+    fn push(dst: &mut Vec<ValType>);
 
-    struct Reset<'a>(&'a Store);
+    // Does the next valtype(s) match this type?
+    #[doc(hidden)]
+    fn matches(tys: impl Iterator<Item = ValType>) -> anyhow::Result<()>;
 
-    impl Drop for Reset<'_> {
-        #[inline]
-        fn drop(&mut self) {
-            self.0.externref_activations_table().set_stack_canary(None);
+    // Load this type's raw ABI representation from an args array.
+    #[doc(hidden)]
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi;
 
-            // see docs above for why this uses `Relaxed`
-            self.0
-                .interrupts()
-                .stack_limit
-                .store(usize::max_value(), Relaxed);
-        }
-    }
+    // Store this type's raw ABI representation into an args array.
+    #[doc(hidden)]
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128);
 }
 
 /// A trait implemented for types which can be returned from closures passed to
@@ -1261,12 +896,10 @@ pub unsafe trait WasmRet {
     // Same as `WasmTy::Abi`.
     #[doc(hidden)]
     type Abi: Copy;
-    #[doc(hidden)]
-    type Retptr: Copy;
 
     // Same as `WasmTy::compatible_with_store`.
     #[doc(hidden)]
-    fn compatible_with_store(&self, store: &Store) -> bool;
+    fn compatible_with_store<'a>(&self, store: WeakStore<'a>) -> bool;
 
     // Similar to `WasmTy::into_abi_for_arg` but used when host code is
     // returning a value into Wasm, rather than host code passing an argument to
@@ -1275,23 +908,421 @@ pub unsafe trait WasmRet {
     // `invoke_wasm_and_catch_traps` is on the stack, and therefore this method
     // is unsafe.
     #[doc(hidden)]
-    unsafe fn into_abi_for_ret(self, store: &Store, ptr: Self::Retptr) -> Result<Self::Abi, Trap>;
+    unsafe fn into_abi_for_ret<'a>(self, store: WeakStore<'a>) -> Self::Abi;
 
+    // Same as `WasmTy::from_abi`.
     #[doc(hidden)]
-    fn func_type(params: impl Iterator<Item = ValType>) -> FuncType;
+    unsafe fn from_abi<'a>(abi: Self::Abi, store: WeakStore<'a>) -> Self;
 
+    // Same as `WasmTy::push`.
     #[doc(hidden)]
-    unsafe fn wrap_trampoline(ptr: *mut u128, f: impl FnOnce(Self::Retptr) -> Self::Abi);
+    fn push(dst: &mut Vec<ValType>);
 
-    // Utilities used to convert an instance of this type to a `Result`
-    // explicitly, used when wrapping async functions which always bottom-out
-    // in a function that returns a trap because futures can be cancelled.
+    // Same as `WasmTy::matches`.
     #[doc(hidden)]
-    type Fallible: WasmRet;
+    fn matches(tys: impl Iterator<Item = ValType>) -> anyhow::Result<()>;
+
+    // Same as `WasmTy::load_from_args`.
     #[doc(hidden)]
-    fn into_fallible(self) -> Self::Fallible;
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi;
+
+    // Same as `WasmTy::store_to_args`.
     #[doc(hidden)]
-    fn fallible_from_trap(trap: Trap) -> Self::Fallible;
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128);
+}
+
+unsafe impl WasmTy for () {
+    type Abi = Self;
+
+    #[inline]
+    fn compatible_with_store<'a>(&self, _store: WeakStore<'a>) -> bool {
+        true
+    }
+
+    #[inline]
+    fn into_abi_for_arg<'a>(self, _store: WeakStore<'a>) -> Self::Abi {}
+
+    #[inline]
+    unsafe fn from_abi<'a>(_abi: Self::Abi, _store: WeakStore<'a>) -> Self {}
+
+    fn push(_dst: &mut Vec<ValType>) {}
+
+    fn matches(_tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    unsafe fn load_from_args(_ptr: &mut *const u128) -> Self::Abi {}
+
+    #[inline]
+    unsafe fn store_to_args(_abi: Self::Abi, _ptr: *mut u128) {}
+}
+
+unsafe impl WasmTy for i32 {
+    type Abi = Self;
+
+    #[inline]
+    fn compatible_with_store<'a>(&self, _store: WeakStore<'a>) -> bool {
+        true
+    }
+
+    #[inline]
+    fn into_abi_for_arg<'a>(self, _store: WeakStore<'a>) -> Self::Abi {
+        self
+    }
+
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, _store: WeakStore<'a>) -> Self {
+        abi
+    }
+
+    fn push(dst: &mut Vec<ValType>) {
+        dst.push(ValType::I32);
+    }
+
+    fn matches(mut tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        let next = tys.next();
+        ensure!(
+            next == Some(ValType::I32),
+            "Type mismatch, expected i32, got {:?}",
+            next
+        );
+        Ok(())
+    }
+
+    #[inline]
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        let ret = **ptr as Self;
+        *ptr = (*ptr).add(1);
+        return ret;
+    }
+
+    #[inline]
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        *ptr = abi as u128;
+    }
+}
+
+unsafe impl WasmTy for u32 {
+    type Abi = <i32 as WasmTy>::Abi;
+
+    #[inline]
+    fn compatible_with_store<'a>(&self, _store: WeakStore<'a>) -> bool {
+        true
+    }
+
+    #[inline]
+    fn into_abi_for_arg<'a>(self, _store: WeakStore<'a>) -> Self::Abi {
+        self as i32
+    }
+
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, _store: WeakStore<'a>) -> Self {
+        abi as Self
+    }
+
+    fn push(dst: &mut Vec<ValType>) {
+        <i32 as WasmTy>::push(dst)
+    }
+
+    fn matches(tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        <i32 as WasmTy>::matches(tys)
+    }
+
+    #[inline]
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        <i32 as WasmTy>::load_from_args(ptr)
+    }
+
+    #[inline]
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        <i32 as WasmTy>::store_to_args(abi, ptr)
+    }
+}
+
+unsafe impl WasmTy for i64 {
+    type Abi = Self;
+
+    #[inline]
+    fn compatible_with_store<'a>(&self, _store: WeakStore<'a>) -> bool {
+        true
+    }
+
+    #[inline]
+    fn into_abi_for_arg<'a>(self, _store: WeakStore<'a>) -> Self::Abi {
+        self
+    }
+
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, _store: WeakStore<'a>) -> Self {
+        abi
+    }
+
+    fn push(dst: &mut Vec<ValType>) {
+        dst.push(ValType::I64);
+    }
+
+    fn matches(mut tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        let next = tys.next();
+        ensure!(
+            next == Some(ValType::I64),
+            "Type mismatch, expected i64, got {:?}",
+            next
+        );
+        Ok(())
+    }
+
+    #[inline]
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        let ret = **ptr as Self;
+        *ptr = (*ptr).add(1);
+        return ret;
+    }
+
+    #[inline]
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        *ptr = abi as u128;
+    }
+}
+
+unsafe impl WasmTy for u64 {
+    type Abi = <i64 as WasmTy>::Abi;
+
+    #[inline]
+    fn compatible_with_store<'a>(&self, _store: WeakStore<'a>) -> bool {
+        true
+    }
+
+    #[inline]
+    fn into_abi_for_arg<'a>(self, _store: WeakStore<'a>) -> Self::Abi {
+        self as i64
+    }
+
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, _store: WeakStore<'a>) -> Self {
+        abi as Self
+    }
+
+    fn push(dst: &mut Vec<ValType>) {
+        <i64 as WasmTy>::push(dst)
+    }
+
+    fn matches(tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        <i64 as WasmTy>::matches(tys)
+    }
+
+    #[inline]
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        <i64 as WasmTy>::load_from_args(ptr)
+    }
+
+    #[inline]
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        <i64 as WasmTy>::store_to_args(abi, ptr)
+    }
+}
+
+unsafe impl WasmTy for f32 {
+    type Abi = Self;
+
+    #[inline]
+    fn compatible_with_store<'a>(&self, _store: WeakStore<'a>) -> bool {
+        true
+    }
+
+    #[inline]
+    fn into_abi_for_arg<'a>(self, _store: WeakStore<'a>) -> Self::Abi {
+        self
+    }
+
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, _store: WeakStore<'a>) -> Self {
+        abi
+    }
+
+    fn push(dst: &mut Vec<ValType>) {
+        dst.push(ValType::F32);
+    }
+
+    fn matches(mut tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        let next = tys.next();
+        ensure!(
+            next == Some(ValType::F32),
+            "Type mismatch, expected f32, got {:?}",
+            next
+        );
+        Ok(())
+    }
+
+    #[inline]
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        let ret = f32::from_bits(**ptr as u32);
+        *ptr = (*ptr).add(1);
+        return ret;
+    }
+
+    #[inline]
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        *ptr = abi.to_bits() as u128;
+    }
+}
+
+unsafe impl WasmTy for f64 {
+    type Abi = Self;
+
+    #[inline]
+    fn compatible_with_store<'a>(&self, _store: WeakStore<'a>) -> bool {
+        true
+    }
+
+    #[inline]
+    fn into_abi_for_arg<'a>(self, _store: WeakStore<'a>) -> Self::Abi {
+        self
+    }
+
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, _store: WeakStore<'a>) -> Self {
+        abi
+    }
+
+    fn push(dst: &mut Vec<ValType>) {
+        dst.push(ValType::F64);
+    }
+
+    fn matches(mut tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        let next = tys.next();
+        ensure!(
+            next == Some(ValType::F64),
+            "Type mismatch, expected f64, got {:?}",
+            next
+        );
+        Ok(())
+    }
+
+    #[inline]
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        let ret = f64::from_bits(**ptr as u64);
+        *ptr = (*ptr).add(1);
+        return ret;
+    }
+
+    #[inline]
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        *ptr = abi.to_bits() as u128;
+    }
+}
+
+unsafe impl WasmTy for Option<ExternRef> {
+    type Abi = *mut u8;
+
+    #[inline]
+    fn compatible_with_store<'a>(&self, _store: WeakStore<'a>) -> bool {
+        true
+    }
+
+    #[inline]
+    fn into_abi_for_arg<'a>(self, store: WeakStore<'a>) -> Self::Abi {
+        if let Some(x) = self {
+            let store = Store::upgrade(store.0).unwrap();
+            let abi = x.inner.as_raw();
+            unsafe {
+                store
+                    .externref_activations_table()
+                    .insert_with_gc(x.inner, store.stack_map_registry());
+            }
+            abi
+        } else {
+            ptr::null_mut()
+        }
+    }
+
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, _store: WeakStore<'a>) -> Self {
+        if abi.is_null() {
+            None
+        } else {
+            Some(ExternRef {
+                inner: wasmtime_runtime::VMExternRef::clone_from_raw(abi),
+            })
+        }
+    }
+
+    fn push(dst: &mut Vec<ValType>) {
+        dst.push(ValType::ExternRef);
+    }
+
+    fn matches(mut tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        let next = tys.next();
+        ensure!(
+            next == Some(ValType::ExternRef),
+            "Type mismatch, expected externref, got {:?}",
+            next
+        );
+        Ok(())
+    }
+
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        let ret = **ptr as usize as *mut u8;
+        *ptr = (*ptr).add(1);
+        ret
+    }
+
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        ptr::write(ptr, abi as usize as u128);
+    }
+}
+
+unsafe impl WasmTy for Option<Func> {
+    type Abi = *mut wasmtime_runtime::VMCallerCheckedAnyfunc;
+
+    #[inline]
+    fn compatible_with_store<'a>(&self, store: WeakStore<'a>) -> bool {
+        if let Some(f) = self {
+            let store = Store::upgrade(store.0).unwrap();
+            Store::same(&store, f.store())
+        } else {
+            true
+        }
+    }
+
+    #[inline]
+    fn into_abi_for_arg<'a>(self, _store: WeakStore<'a>) -> Self::Abi {
+        if let Some(f) = self {
+            f.caller_checked_anyfunc().as_ptr()
+        } else {
+            ptr::null_mut()
+        }
+    }
+
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, store: WeakStore<'a>) -> Self {
+        let store = Store::upgrade(store.0).unwrap();
+        Func::from_caller_checked_anyfunc(&store, abi)
+    }
+
+    fn push(dst: &mut Vec<ValType>) {
+        dst.push(ValType::FuncRef);
+    }
+
+    fn matches(mut tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        let next = tys.next();
+        ensure!(
+            next == Some(ValType::FuncRef),
+            "Type mismatch, expected funcref, got {:?}",
+            next
+        );
+        Ok(())
+    }
+
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        let ret = **ptr as usize as *mut wasmtime_runtime::VMCallerCheckedAnyfunc;
+        *ptr = (*ptr).add(1);
+        ret
+    }
+
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        ptr::write(ptr, abi as usize as u128);
+    }
 }
 
 unsafe impl<T> WasmRet for T
@@ -1299,245 +1330,101 @@ where
     T: WasmTy,
 {
     type Abi = <T as WasmTy>::Abi;
-    type Retptr = ();
-    type Fallible = Result<T, Trap>;
 
-    fn compatible_with_store(&self, store: &Store) -> bool {
+    #[inline]
+    fn compatible_with_store<'a>(&self, store: WeakStore<'a>) -> bool {
         <Self as WasmTy>::compatible_with_store(self, store)
     }
 
-    unsafe fn into_abi_for_ret(self, store: &Store, _retptr: ()) -> Result<Self::Abi, Trap> {
-        Ok(<Self as WasmTy>::into_abi(self, store))
+    #[inline]
+    unsafe fn into_abi_for_ret<'a>(self, store: WeakStore<'a>) -> Self::Abi {
+        <Self as WasmTy>::into_abi_for_arg(self, store)
     }
 
-    fn func_type(params: impl Iterator<Item = ValType>) -> FuncType {
-        FuncType::new(params, Some(<Self as WasmTy>::valtype()))
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, store: WeakStore<'a>) -> Self {
+        <Self as WasmTy>::from_abi(abi, store)
     }
 
-    unsafe fn wrap_trampoline(ptr: *mut u128, f: impl FnOnce(Self::Retptr) -> Self::Abi) {
-        *ptr.cast::<Self::Abi>() = f(());
+    #[inline]
+    fn push(dst: &mut Vec<ValType>) {
+        <Self as WasmTy>::push(dst)
     }
 
-    fn into_fallible(self) -> Result<T, Trap> {
-        Ok(self)
+    #[inline]
+    fn matches(tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        <Self as WasmTy>::matches(tys)
     }
 
-    fn fallible_from_trap(trap: Trap) -> Result<T, Trap> {
-        Err(trap)
+    #[inline]
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        <Self as WasmTy>::load_from_args(ptr)
+    }
+
+    #[inline]
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        <Self as WasmTy>::store_to_args(abi, ptr)
     }
 }
 
 unsafe impl<T> WasmRet for Result<T, Trap>
 where
-    T: WasmRet,
+    T: WasmTy,
 {
-    type Abi = <T as WasmRet>::Abi;
-    type Retptr = <T as WasmRet>::Retptr;
-    type Fallible = Self;
+    type Abi = <T as WasmTy>::Abi;
 
-    fn compatible_with_store(&self, store: &Store) -> bool {
+    #[inline]
+    fn compatible_with_store<'a>(&self, store: WeakStore<'a>) -> bool {
         match self {
-            Ok(x) => <T as WasmRet>::compatible_with_store(x, store),
+            Ok(x) => <T as WasmTy>::compatible_with_store(x, store),
             Err(_) => true,
         }
     }
 
-    unsafe fn into_abi_for_ret(
-        self,
-        store: &Store,
-        retptr: Self::Retptr,
-    ) -> Result<Self::Abi, Trap> {
-        self.and_then(|val| val.into_abi_for_ret(store, retptr))
+    #[inline]
+    unsafe fn into_abi_for_ret<'a>(self, store: WeakStore<'a>) -> Self::Abi {
+        match self {
+            Ok(val) => return <T as WasmTy>::into_abi_for_arg(val, store),
+            Err(trap) => handle_trap(trap),
+        }
+
+        unsafe fn handle_trap(trap: Trap) -> ! {
+            raise_user_trap(trap.into())
+        }
     }
 
-    fn func_type(params: impl Iterator<Item = ValType>) -> FuncType {
-        T::func_type(params)
+    #[inline]
+    unsafe fn from_abi<'a>(abi: Self::Abi, store: WeakStore<'a>) -> Self {
+        Ok(<T as WasmTy>::from_abi(abi, store))
     }
 
-    unsafe fn wrap_trampoline(ptr: *mut u128, f: impl FnOnce(Self::Retptr) -> Self::Abi) {
-        T::wrap_trampoline(ptr, f)
+    fn push(dst: &mut Vec<ValType>) {
+        <T as WasmTy>::push(dst)
     }
 
-    fn into_fallible(self) -> Result<T, Trap> {
-        self
+    fn matches(tys: impl Iterator<Item = ValType>) -> anyhow::Result<()> {
+        <T as WasmTy>::matches(tys)
     }
 
-    fn fallible_from_trap(trap: Trap) -> Result<T, Trap> {
-        Err(trap)
+    #[inline]
+    unsafe fn load_from_args(ptr: &mut *const u128) -> Self::Abi {
+        <T as WasmTy>::load_from_args(ptr)
+    }
+
+    #[inline]
+    unsafe fn store_to_args(abi: Self::Abi, ptr: *mut u128) {
+        <T as WasmTy>::store_to_args(abi, ptr);
     }
 }
-
-macro_rules! impl_wasm_host_results {
-    ($n:tt $($t:ident)*) => (
-        #[allow(non_snake_case)]
-        unsafe impl<$($t),*> WasmRet for ($($t,)*)
-        where
-            $($t: WasmTy,)*
-            ($($t::Abi,)*): HostAbi,
-        {
-            type Abi = <($($t::Abi,)*) as HostAbi>::Abi;
-            type Retptr = <($($t::Abi,)*) as HostAbi>::Retptr;
-            type Fallible = Result<Self, Trap>;
-
-            #[inline]
-            fn compatible_with_store(&self, _store: &Store) -> bool {
-                let ($($t,)*) = self;
-                $( $t.compatible_with_store(_store) && )* true
-            }
-
-            #[inline]
-            unsafe fn into_abi_for_ret(self, _store: &Store, ptr: Self::Retptr) -> Result<Self::Abi, Trap> {
-                let ($($t,)*) = self;
-                let abi = ($($t.into_abi(_store),)*);
-                Ok(<($($t::Abi,)*) as HostAbi>::into_abi(abi, ptr))
-            }
-
-            fn func_type(params: impl Iterator<Item = ValType>) -> FuncType {
-                FuncType::new(
-                    params,
-                    std::array::IntoIter::new([$($t::valtype(),)*]),
-                )
-            }
-
-            #[allow(unused_assignments)]
-            unsafe fn wrap_trampoline(mut _ptr: *mut u128, f: impl FnOnce(Self::Retptr) -> Self::Abi) {
-                let ($($t,)*) = <($($t::Abi,)*) as HostAbi>::call(f);
-                $(
-                    *_ptr.cast() = $t;
-                    _ptr = _ptr.add(1);
-                )*
-            }
-
-            #[inline]
-            fn into_fallible(self) -> Result<Self, Trap> {
-                Ok(self)
-            }
-
-            #[inline]
-            fn fallible_from_trap(trap: Trap) -> Result<Self, Trap> {
-                Err(trap)
-            }
-        }
-    )
-}
-
-for_each_function_signature!(impl_wasm_host_results);
-
-// Internal trait representing how to communicate tuples of return values across
-// an ABI boundary. This internally corresponds to the "wasmtime" ABI inside of
-// cranelift itself. Notably the first element of each tuple is returned via the
-// typical system ABI (e.g. systemv or fastcall depending on platform) and all
-// other values are returned packed via the stack.
-//
-// This trait helps to encapsulate all the details of that.
-#[doc(hidden)]
-pub trait HostAbi {
-    // A value returned from native functions which return `Self`
-    type Abi: Copy;
-    // A return pointer, added to the end of the argument list, for native
-    // functions that return `Self`. Note that a 0-sized type here should get
-    // elided at the ABI level.
-    type Retptr: Copy;
-
-    // Converts a value of `self` into its components. Stores necessary values
-    // into `ptr` and then returns whatever needs to be returned from the
-    // function.
-    unsafe fn into_abi(self, ptr: Self::Retptr) -> Self::Abi;
-
-    // Calls `f` with a suitably sized return area and requires `f` to return
-    // the raw abi value of the first element of our tuple. This will then
-    // unpack the `Retptr` and assemble it with `Self::Abi` to return an
-    // instance of the whole tuple.
-    unsafe fn call(f: impl FnOnce(Self::Retptr) -> Self::Abi) -> Self;
-}
-
-macro_rules! impl_host_abi {
-    // Base case, everything is `()`
-    (0) => {
-        impl HostAbi for () {
-            type Abi = ();
-            type Retptr = ();
-
-            unsafe fn into_abi(self, _ptr: Self::Retptr) -> Self::Abi {}
-
-            unsafe fn call(f: impl FnOnce(Self::Retptr) -> Self::Abi) -> Self {
-                f(())
-            }
-        }
-    };
-
-    // In the 1-case the retptr is not present, so it's a 0-sized value.
-    (1 $a:ident) => {
-        impl<$a: Copy> HostAbi for ($a,) {
-            type Abi = $a;
-            type Retptr = ();
-
-            unsafe fn into_abi(self, _ptr: Self::Retptr) -> Self::Abi {
-                self.0
-            }
-
-            unsafe fn call(f: impl FnOnce(Self::Retptr) -> Self::Abi) -> Self {
-                (f(()),)
-            }
-        }
-    };
-
-    // This is where the more interesting case happens. The first element of the
-    // tuple is returned via `Abi` and all other elements are returned via
-    // `Retptr`. We create a `TupleRetNN` structure to represent all of the
-    // return values here.
-    //
-    // Also note that this isn't implemented for the old backend right now due
-    // to the original author not really being sure how to implement this in the
-    // old backend.
-    ($n:tt $t:ident $($u:ident)*) => {paste::paste!{
-        #[doc(hidden)]
-        #[allow(non_snake_case)]
-        #[repr(C)]
-        #[cfg(not(feature = "old-x86-backend"))]
-        pub struct [<TupleRet $n>]<$($u,)*> {
-            $($u: $u,)*
-        }
-
-        #[cfg(not(feature = "old-x86-backend"))]
-        #[allow(non_snake_case, unused_assignments)]
-        impl<$t: Copy, $($u: Copy,)*> HostAbi for ($t, $($u,)*) {
-            type Abi = $t;
-            type Retptr = *mut [<TupleRet $n>]<$($u,)*>;
-
-            unsafe fn into_abi(self, ptr: Self::Retptr) -> Self::Abi {
-                let ($t, $($u,)*) = self;
-                // Store the tail of our tuple into the return pointer...
-                $((*ptr).$u = $u;)*
-                // ... and return the head raw.
-                $t
-            }
-
-            unsafe fn call(f: impl FnOnce(Self::Retptr) -> Self::Abi) -> Self {
-                // Create space to store all the return values and then invoke
-                // the function.
-                let mut space = std::mem::MaybeUninit::uninit();
-                let t = f(space.as_mut_ptr());
-                let space = space.assume_init();
-
-                // Use the return value as the head of the tuple and unpack our
-                // return area to get the rest of the tuple.
-                (t, $(space.$u,)*)
-            }
-        }
-    }};
-}
-
-for_each_function_signature!(impl_host_abi);
 
 /// Internal trait implemented for all arguments that can be passed to
-/// [`Func::wrap`] and [`Config::wrap_host_func`](crate::Config::wrap_host_func).
+/// [`Func::wrap`].
 ///
 /// This trait should not be implemented by external users, it's only intended
 /// as an implementation detail of this crate.
 pub trait IntoFunc<Params, Results> {
     #[doc(hidden)]
-    fn into_func(self, store: Option<&Store>) -> (FuncType, InstanceHandle, VMTrampoline);
+    fn into_func(self, store: &Store) -> Func;
 }
 
 /// A structure representing the *caller's* context when creating a function
@@ -1560,7 +1447,23 @@ pub trait IntoFunc<Params, Results> {
 /// you're relying on this Caller type it's recommended to become familiar with
 /// interface types to ensure that your use case is covered by the proposal.
 pub struct Caller<'a> {
-    store: &'a Store,
+    // Note that this is a `Weak` pointer instead of a `&'a Store`,
+    // intentionally so. This allows us to break an `Rc` cycle which would
+    // otherwise look like this:
+    //
+    // * A `Store` object ...
+    // * ... owns all `InstanceHandle` objects ...
+    // * ... which are created in `Func::wrap` with custom host data ...
+    // * ... where the custom host data needs to point to `Store` to be stored
+    //   here
+    //
+    // This `Rc` cycle means that we would never actually reclaim any memory or
+    // deallocate any instances. To break this cycle we use a weak pointer here
+    // which points back to `Store`. A `Caller` should only ever be usable
+    // when the original `Store` is alive, however, so this should always be an
+    // upgrade-able pointer. Alternative solutions or other ideas to break this
+    // cycle would be most welcome!
+    store: &'a Weak<StoreInner>,
     caller_vmctx: *mut VMContext,
 }
 
@@ -1573,7 +1476,7 @@ impl Caller<'_> {
     /// in the future!
     ///
     /// Note that when accessing and calling exported functions, one should adhere
-    /// to the guidelines of the interface types proposal.
+    /// to the guidlines of the interface types proposal.
     ///
     /// # Return
     ///
@@ -1594,26 +1497,26 @@ impl Caller<'_> {
                 return None;
             }
             let instance = InstanceHandle::from_vmctx(self.caller_vmctx);
-            let handle = self.store.existing_instance_handle(instance);
-            let index = handle.module().exports.get(name)?;
-            match index {
-                // Only allow memory/functions for now to emulate what interface
-                // types will once provide
-                EntityIndex::Memory(_) | EntityIndex::Function(_) => {
-                    Some(Extern::from_wasmtime_export(
-                        &handle.lookup_by_declaration(&index),
-                        &handle.store,
-                    ))
-                }
+            let export = instance.lookup(name)?;
+            // Our `Weak` pointer is used only to break a cycle where `Store`
+            // stores instance handles which have this weak pointer as their
+            // custom host data. This function should only be invoke-able while
+            // the `Store` is active, so this upgrade should always succeed.
+            debug_assert!(self.store.upgrade().is_some());
+            let handle =
+                Store::from_inner(self.store.upgrade()?).existing_instance_handle(instance);
+            match export {
+                Export::Memory(m) => Some(Extern::Memory(Memory::from_wasmtime_memory(m, handle))),
+                Export::Function(f) => Some(Extern::Func(Func::from_wasmtime_function(f, handle))),
                 _ => None,
             }
         }
     }
 
-    /// Get a reference to the caller's store.
-    #[inline]
-    pub fn store(&self) -> &Store {
-        self.store
+    /// Get a handle to this caller's store.
+    pub fn store(&self) -> Store {
+        // See comment above the `store` member for why this unwrap is OK.
+        Store::upgrade(&self.store).unwrap()
     }
 }
 
@@ -1639,23 +1542,23 @@ unsafe fn raise_cross_store_trap() -> ! {
 }
 
 macro_rules! impl_into_func {
-    ($num:tt $($args:ident)*) => {
+    ($(
+        ($($args:ident)*)
+    )*) => ($(
         // Implement for functions without a leading `&Caller` parameter,
         // delegating to the implementation below which does have the leading
         // `Caller` parameter.
-        #[allow(non_snake_case)]
         impl<F, $($args,)* R> IntoFunc<($($args,)*), R> for F
         where
             F: Fn($($args),*) -> R + 'static,
             $($args: WasmTy,)*
             R: WasmRet,
         {
-            fn into_func(self, store: Option<&Store>) -> (FuncType, InstanceHandle, VMTrampoline) {
-                let f = move |_: Caller<'_>, $($args:$args),*| {
+            #[allow(non_snake_case)]
+            fn into_func(self, store: &Store) -> Func {
+                Func::wrap(store, move |_: Caller<'_>, $($args:$args),*| {
                     self($($args),*)
-                };
-
-                f.into_func(store)
+                })
             }
         }
 
@@ -1666,7 +1569,7 @@ macro_rules! impl_into_func {
             $($args: WasmTy,)*
             R: WasmRet,
         {
-            fn into_func(self, store: Option<&Store>) -> (FuncType, InstanceHandle, VMTrampoline) {
+            fn into_func(self, store: &Store) -> Func {
                 /// This shim is called by Wasm code, constructs a `Caller`,
                 /// calls the wrapped host function, and returns the translated
                 /// result back to Wasm.
@@ -1678,80 +1581,40 @@ macro_rules! impl_into_func {
                     vmctx: *mut VMContext,
                     caller_vmctx: *mut VMContext,
                     $( $args: $args::Abi, )*
-                    retptr: R::Retptr,
                 ) -> R::Abi
                 where
                     F: Fn(Caller<'_>, $( $args ),*) -> R + 'static,
                     $( $args: WasmTy, )*
                     R: WasmRet,
                 {
-                    enum CallResult<T> {
-                        Ok(T),
-                        Trap(Trap),
-                        Panic(Box<dyn std::any::Any + Send>),
-                    }
+                    let state = (*vmctx).host_state();
+                    // Double-check ourselves in debug mode, but we control
+                    // the `Any` here so an unsafe downcast should also
+                    // work.
+                    debug_assert!(state.is::<(F, Weak<StoreInner>)>());
+                    let (func, store) = &*(state as *const _ as *const (F, Weak<StoreInner>));
+                    let weak_store = WeakStore(store);
 
-                    // Note that this `result` is intentionally scoped into a
-                    // separate block. Handling traps and panics will involve
-                    // longjmp-ing from this function which means we won't run
-                    // destructors. As a result anything requiring a destructor
-                    // should be part of this block, and the long-jmp-ing
-                    // happens after the block in handling `CallResult`.
-                    let result = {
-                        let state = (*vmctx).host_state();
-                        // Double-check ourselves in debug mode, but we control
-                        // the `Any` here so an unsafe downcast should also
-                        // work.
-                        debug_assert!(state.is::<F>());
-                        let func = &*(state as *const _ as *const F);
-
-                        let store = wasmtime_runtime::with_last_info(|last| {
-                            last.and_then(|s| s.downcast_ref::<Store>())
-                                .cloned()
-                                .expect("function called without thread state")
-                        });
-
-                        let ret = {
-                            panic::catch_unwind(AssertUnwindSafe(|| {
-                                func(
-                                    Caller { store: &store, caller_vmctx },
-                                    $( $args::from_abi($args, &store), )*
-                                )
-                            }))
-                        };
-
-                        // Note that we need to be careful when dealing with traps
-                        // here. Traps are implemented with longjmp/setjmp meaning
-                        // that it's not unwinding and consequently no Rust
-                        // destructors are run. We need to be careful to ensure that
-                        // nothing on the stack needs a destructor when we exit
-                        // abnormally from this `match`, e.g. on `Err`, on
-                        // cross-store-issues, or if `Ok(Err)` is raised.
-                        match ret {
-                            Err(panic) => CallResult::Panic(panic),
-                            Ok(ret) => {
-                                // Because the wrapped function is not `unsafe`, we
-                                // can't assume it returned a value that is
-                                // compatible with this store.
-                                if !ret.compatible_with_store(&store) {
-                                    // Explicitly drop all locals with destructors prior to raising the trap
-                                    drop(store);
-                                    drop(ret);
-                                    raise_cross_store_trap();
-                                }
-
-                                match ret.into_abi_for_ret(&store, retptr) {
-                                    Ok(val) => CallResult::Ok(val),
-                                    Err(trap) => CallResult::Trap(trap),
-                                }
-                            }
-                        }
+                    let ret = {
+                        panic::catch_unwind(AssertUnwindSafe(|| {
+                            func(
+                                Caller { store, caller_vmctx },
+                                $( $args::from_abi($args, weak_store), )*
+                            )
+                        }))
                     };
+                    match ret {
+                        Err(panic) => wasmtime_runtime::resume_panic(panic),
+                        Ok(ret) => {
+                            // Because the wrapped function is not `unsafe`, we
+                            // can't assume it returned a value that is
+                            // compatible with this store.
+                            if !ret.compatible_with_store(weak_store) {
+                                raise_cross_store_trap();
+                            }
 
-                    match result {
-                        CallResult::Ok(val) => val,
-                        CallResult::Trap(trap) => raise_user_trap(trap.into()),
-                        CallResult::Panic(panic) => wasmtime_runtime::resume_panic(panic),
+                            ret.into_abi_for_ret(weak_store)
+                        }
                     }
                 }
 
@@ -1778,52 +1641,66 @@ macro_rules! impl_into_func {
                             *mut VMContext,
                             *mut VMContext,
                             $( $args::Abi, )*
-                            R::Retptr,
                         ) -> R::Abi,
                     >(ptr);
 
-                    let mut _n = 0;
-                    $(
-                        let $args = *args.add(_n).cast::<$args::Abi>();
-                        _n += 1;
-                    )*
-                    R::wrap_trampoline(args, |retptr| {
-                        ptr(callee_vmctx, caller_vmctx, $( $args, )* retptr)
-                    });
+                    let mut _next = args as *const u128;
+                    $( let $args = $args::load_from_args(&mut _next); )*
+                    let ret = ptr(callee_vmctx, caller_vmctx, $( $args ),*);
+                    R::store_to_args(ret, args);
                 }
 
-                let ty = R::func_type(
-                    None::<ValType>.into_iter()
-                        $(.chain(Some($args::valtype())))*
-                );
+                let mut _args = Vec::new();
+                $($args::push(&mut _args);)*
+                let mut ret = Vec::new();
+                R::push(&mut ret);
+                let ty = FuncType::new(_args.into(), ret.into());
 
+                let store_weak = store.weak();
                 let trampoline = host_trampoline::<$($args,)* R>;
-
-                // If not given a store, use a default signature index that is guaranteed to trap.
-                // If the function is called indirectly without first being associated with a store (a bug condition).
-                let shared_signature_id = store
-                    .map(|s| s.signatures().borrow_mut().register(ty.as_wasm_func_type(), trampoline))
-                    .unwrap_or(VMSharedSignatureIndex::default());
-
-                let instance = unsafe {
-                    crate::trampoline::create_raw_function(
+                let (instance, export) = unsafe {
+                    crate::trampoline::generate_raw_func_export(
+                        &ty,
                         std::slice::from_raw_parts_mut(
                             wasm_to_host_shim::<F, $($args,)* R> as *mut _,
                             0,
                         ),
-                        Box::new(self),
-                        shared_signature_id
+                        trampoline,
+                        store,
+                        Box::new((self, store_weak)),
                     )
-                    .expect("failed to create raw function")
+                    .expect("failed to generate export")
                 };
 
-                (ty, instance, trampoline)
+                Func {
+                    instance,
+                    export,
+                    trampoline,
+                }
             }
         }
-    }
+    )*)
 }
 
-for_each_function_signature!(impl_into_func);
+impl_into_func! {
+    ()
+    (A1)
+    (A1 A2)
+    (A1 A2 A3)
+    (A1 A2 A3 A4)
+    (A1 A2 A3 A4 A5)
+    (A1 A2 A3 A4 A5 A6)
+    (A1 A2 A3 A4 A5 A6 A7)
+    (A1 A2 A3 A4 A5 A6 A7 A8)
+    (A1 A2 A3 A4 A5 A6 A7 A8 A9)
+    (A1 A2 A3 A4 A5 A6 A7 A8 A9 A10)
+    (A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11)
+    (A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12)
+    (A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13)
+    (A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14)
+    (A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14 A15)
+    (A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14 A15 A16)
+}
 
 #[test]
 fn wasm_ty_roundtrip() -> Result<(), anyhow::Error> {
@@ -1873,7 +1750,10 @@ fn wasm_ty_roundtrip() -> Result<(), anyhow::Error> {
          "#,
     )?;
     let instance = Instance::new(&store, &module, &[debug.into()])?;
-    let foo = instance.get_typed_func::<(i32, u32, f32, i64, u64, f64), ()>("foo")?;
-    foo.call((-1, 1, 2.0, -3, 3, 4.0))?;
+    let foo = instance
+        .get_func("foo")
+        .unwrap()
+        .get6::<i32, u32, f32, i64, u64, f64, ()>()?;
+    foo(-1, 1, 2.0, -3, 3, 4.0)?;
     Ok(())
 }

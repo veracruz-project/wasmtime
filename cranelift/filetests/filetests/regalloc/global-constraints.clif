@@ -1,5 +1,5 @@
 test regalloc
-target i686 legacy
+target i686
 
 ; This test covers the troubles when values with global live ranges are defined
 ; by instructions with constrained register classes.

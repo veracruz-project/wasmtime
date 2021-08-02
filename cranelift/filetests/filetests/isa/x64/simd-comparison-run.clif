@@ -1,6 +1,7 @@
 test run
 set enable_simd
-target x86_64 machinst
+target x86_64
+feature "experimental_x64"
 
 function %icmp_eq_i8x16() -> b8 {
 block0:

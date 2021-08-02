@@ -1,7 +1,7 @@
 //! A `Compilation` contains the compiled function bodies for a WebAssembly
 //! module.
 
-use crate::{FunctionAddressMap, FunctionBodyData, ModuleTranslation, Tunables, TypeTables};
+use crate::{FunctionAddressMap, FunctionBodyData, ModuleTranslation};
 use cranelift_codegen::{binemit, ir, isa, isa::unwind::UnwindInfo};
 use cranelift_entity::PrimaryMap;
 use cranelift_wasm::{DefinedFuncIndex, FuncIndex, WasmError};
@@ -61,6 +61,8 @@ pub enum RelocationTarget {
 pub struct TrapInformation {
     /// The offset of the trapping instruction in native code. It is relative to the beginning of the function.
     pub code_offset: binemit::CodeOffset,
+    /// Location of trapping instruction in WebAssembly binary module.
+    pub source_loc: ir::SourceLoc,
     /// Code of the trap.
     pub trap_code: ir::TrapCode,
 }
@@ -101,9 +103,7 @@ pub trait Compiler: Send + Sync {
         &self,
         translation: &ModuleTranslation<'_>,
         index: DefinedFuncIndex,
-        data: FunctionBodyData<'_>,
+        data: &FunctionBodyData<'_>,
         isa: &dyn isa::TargetIsa,
-        tunables: &Tunables,
-        types: &TypeTables,
     ) -> Result<CompiledFunction, CompileError>;
 }

@@ -80,6 +80,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt::{self, Display, Formatter, Write};
 use log::debug;
+use thiserror::Error;
 
 pub use self::cssa::verify_cssa;
 pub use self::liveness::verify_liveness;
@@ -91,7 +92,8 @@ mod liveness;
 mod locations;
 
 /// A verifier error.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Error, Debug, PartialEq, Eq, Clone)]
+#[error("{}{}: {}", .location, format_context(.context), .message)]
 pub struct VerifierError {
     /// The entity causing the verifier error.
     pub location: AnyEntity,
@@ -102,16 +104,11 @@ pub struct VerifierError {
     pub message: String,
 }
 
-// This is manually implementing Error and Display instead of using thiserror to reduce the amount
-// of dependencies used by Cranelift.
-impl std::error::Error for VerifierError {}
-
-impl Display for VerifierError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match &self.context {
-            None => write!(f, "{}: {}", self.location, self.message),
-            Some(context) => write!(f, "{} ({}): {}", self.location, context, self.message),
-        }
+/// Helper for formatting Verifier::Error context.
+fn format_context(context: &Option<String>) -> String {
+    match context {
+        None => "".to_string(),
+        Some(c) => format!(" ({})", c),
     }
 }
 
@@ -178,12 +175,8 @@ pub type VerifierStepResult<T> = Result<T, ()>;
 pub type VerifierResult<T> = Result<T, VerifierErrors>;
 
 /// List of verifier errors.
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
+#[derive(Error, Debug, Default, PartialEq, Eq, Clone)]
 pub struct VerifierErrors(pub Vec<VerifierError>);
-
-// This is manually implementing Error and Display instead of using thiserror to reduce the amount
-// of dependencies used by Cranelift.
-impl std::error::Error for VerifierErrors {}
 
 impl VerifierErrors {
     /// Return a new `VerifierErrors` struct.
@@ -2071,7 +2064,10 @@ mod tests {
                 Some(&VerifierError { ref message, .. }) => {
                     if !message.contains($msg) {
                         #[cfg(feature = "std")]
-                        panic!("'{}' did not contain the substring '{}'", message, $msg);
+                        panic!(format!(
+                            "'{}' did not contain the substring '{}'",
+                            message, $msg
+                        ));
                         #[cfg(not(feature = "std"))]
                         panic!("error message did not contain the expected substring");
                     }

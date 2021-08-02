@@ -4,9 +4,10 @@ use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 
 wiggle::from_witx!({
     witx: ["$CARGO_MANIFEST_DIR/tests/pointers.witx"],
+    ctx: WasiCtx,
 });
 
-impl_errno!(types::Errno);
+impl_errno!(types::Errno, types::GuestErrorConversion);
 
 impl<'a> pointers::Pointers for WasiCtx<'a> {
     fn pointers_and_enums<'b>(
@@ -151,12 +152,12 @@ impl PointersAndEnumsExercise {
         let e = pointers::pointers_and_enums(
             &ctx,
             &host_memory,
-            self.input1 as i32,
+            self.input1.into(),
             self.input2_loc.ptr as i32,
             self.input3_loc.ptr as i32,
             self.input4_ptr_loc.ptr as i32,
         );
-        assert_eq!(e, Ok(types::Errno::Ok as i32), "errno");
+        assert_eq!(e, types::Errno::Ok.into(), "errno");
 
         // Implementation of pointers_and_enums writes input3 to the input2_loc:
         let written_to_input2_loc: i32 = host_memory
@@ -165,7 +166,8 @@ impl PointersAndEnumsExercise {
             .expect("input2 ref");
 
         assert_eq!(
-            written_to_input2_loc, self.input3 as i32,
+            written_to_input2_loc,
+            self.input3.into(),
             "pointers_and_enums written to input2"
         );
 

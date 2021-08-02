@@ -260,9 +260,10 @@ impl EncodingRecipeBuilder {
         if !self.format.has_value_list {
             assert!(
                 operands_in.len() == self.format.num_value_operands,
-                "missing operand constraints for recipe {} (format {})",
-                self.name,
-                self.format.name
+                format!(
+                    "missing operand constraints for recipe {} (format {})",
+                    self.name, self.format.name
+                )
             );
         }
 

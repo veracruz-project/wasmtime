@@ -9,6 +9,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use rand::prelude::*;
 use std::fmt::Debug;
+use std::panic;
 use std::time;
 
 pub mod automata;
@@ -23,7 +24,7 @@ pub mod parser;
 /// for use with `cargo test` and CI.
 pub fn check<A>(mut f: impl FnMut(A))
 where
-    A: Clone + Debug + for<'a> Arbitrary<'a>,
+    A: Clone + Debug + Arbitrary,
 {
     let seed = rand::thread_rng().gen();
     let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
@@ -37,7 +38,7 @@ where
     let time_budget = time::Duration::from_secs(2);
     let then = time::Instant::now();
 
-    loop {
+    let (failing_input, panic_info) = loop {
         if num_checked > 0 && time::Instant::now().duration_since(then) > time_budget {
             eprintln!("Checked {} random inputs.", num_checked);
             return;
@@ -47,7 +48,9 @@ where
             Ok(input) => {
                 num_checked += 1;
                 eprintln!("Checking input: {:#?}", input);
-                f(input.clone());
+                if let Err(p) = panic::catch_unwind(panic::AssertUnwindSafe(|| f(input.clone()))) {
+                    break (input, p);
+                }
             }
             Err(e @ arbitrary::Error::NotEnoughData) => {
                 eprintln!("warning: {}", e);
@@ -94,5 +97,23 @@ where
         for i in 0..buf.len() {
             buf[i] = rng.gen();
         }
+    };
+
+    // Shrink the failing input.
+    let mut smallest_failing_input = failing_input;
+    let mut panic_info = panic_info;
+    'shrinking: loop {
+        eprintln!("Smallest failing input: {:#?}", smallest_failing_input);
+        for input in smallest_failing_input.shrink() {
+            if let Err(p) = panic::catch_unwind(panic::AssertUnwindSafe(|| f(input.clone()))) {
+                smallest_failing_input = input;
+                panic_info = p;
+                continue 'shrinking;
+            }
+        }
+        break;
     }
+
+    // Resume the panic for the smallest input.
+    panic::resume_unwind(panic_info);
 }

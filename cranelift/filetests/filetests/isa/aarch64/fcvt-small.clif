@@ -1,5 +1,4 @@
 test compile
-set unwind_info=false
 target aarch64
 
 function u0:0(i8) -> f32 {
@@ -10,6 +9,7 @@ block0(v0: i8):
     ; check: uxtb w0, w0
     ; check: ucvtf s0, w0
     return v1
+    ; check: mov sp, fp
     ; check: ldp fp, lr, [sp], #16
     ; check: ret
 }
@@ -22,6 +22,7 @@ block0(v0: i8):
     ; check: uxtb w0, w0
     ; check: ucvtf d0, w0
     return v1
+    ; check: mov sp, fp
     ; check: ldp fp, lr, [sp], #16
     ; check: ret
 }
@@ -34,6 +35,7 @@ block0(v0: i16):
     ; check: uxth w0, w0
     ; check: ucvtf s0, w0
     return v1
+    ; check: mov sp, fp
     ; check: ldp fp, lr, [sp], #16
     ; check: ret
 }
@@ -46,6 +48,7 @@ block0(v0: i16):
     ; check: uxth w0, w0
     ; check: ucvtf d0, w0
     return v1
+    ; check: mov sp, fp
     ; check: ldp fp, lr, [sp], #16
     ; check: ret
 }
@@ -57,16 +60,15 @@ block0(v0: f32):
     v1 = fcvt_to_uint.i8 v0
     ; check: fcmp s0, s0
     ; check: b.vc 8 ; udf
-    ; check: movz x0, #49024, LSL #16
-    ; check: fmov d1, x0
+    ; check: ldr s1, pc+8 ; b 8 ; data.f32 -1
     ; check: fcmp s0, s1
     ; check: b.gt 8 ; udf
-    ; check: movz x0, #17280, LSL #16
-    ; check: fmov d1, x0
+    ; check: ldr s1, pc+8 ; b 8 ; data.f32 256
     ; check: fcmp s0, s1
     ; check: b.mi 8 ; udf
     ; check: fcvtzu w0, s0
     return v1
+    ; check: mov sp, fp
     ; check: ldp fp, lr, [sp], #16
     ; check: ret
 }
@@ -78,16 +80,15 @@ block0(v0: f64):
     v1 = fcvt_to_uint.i8 v0
     ; check: fcmp d0, d0
     ; check: b.vc 8 ; udf
-    ; check: movz x0, #49136, LSL #48
-    ; check: fmov d1, x0
+    ; check: ldr d1, pc+8 ; b 12 ; data.f64 -1
     ; check: fcmp d0, d1
     ; check: b.gt 8 ; udf
-    ; check: movz x0, #16496, LSL #48
-    ; check: fmov d1, x0
+    ; check: ldr d1, pc+8 ; b 12 ; data.f64 256
     ; check: fcmp d0, d1
     ; check: b.mi 8 ; udf
     ; check: fcvtzu w0, d0
     return v1
+    ; check: mov sp, fp
     ; check: ldp fp, lr, [sp], #16
     ; check: ret
 }
@@ -99,16 +100,15 @@ block0(v0: f32):
     v1 = fcvt_to_uint.i16 v0
     ; check: fcmp s0, s0
     ; check: b.vc 8 ; udf
-    ; check: movz x0, #49024, LSL #16
-    ; check: fmov d1, x0
+    ; check: ldr s1, pc+8 ; b 8 ; data.f32 -1
     ; check: fcmp s0, s1
     ; check: b.gt 8 ; udf
-    ; check: movz x0, #18304, LSL #16
-    ; check: fmov d1, x0
+    ; check: ldr s1, pc+8 ; b 8 ; data.f32 65536
     ; check: fcmp s0, s1
     ; check: b.mi 8 ; udf
     ; check: fcvtzu w0, s0
     return v1
+    ; check: mov sp, fp
     ; check: ldp fp, lr, [sp], #16
     ; check: ret
 }
@@ -120,16 +120,15 @@ block0(v0: f64):
     v1 = fcvt_to_uint.i16 v0
     ; check: fcmp d0, d0
     ; check: b.vc 8 ; udf
-    ; check: movz x0, #49136, LSL #48
-    ; check: fmov d1, x0
+    ; check: ldr d1, pc+8 ; b 12 ; data.f64 -1
     ; check: fcmp d0, d1
     ; check: b.gt 8 ; udf
-    ; check: movz x0, #16624, LSL #48
-    ; check: fmov d1, x0
+    ; check: ldr d1, pc+8 ; b 12 ; data.f64 65536
     ; check: fcmp d0, d1
     ; check: b.mi 8 ; udf
     ; check: fcvtzu w0, d0
     return v1
+    ; check: mov sp, fp
     ; check: ldp fp, lr, [sp], #16
     ; check: ret
 }

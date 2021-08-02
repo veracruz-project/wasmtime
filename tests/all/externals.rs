@@ -57,7 +57,7 @@ fn bad_tables() {
 fn cross_store() -> anyhow::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
-    let engine = Engine::new(&cfg)?;
+    let engine = Engine::new(&cfg);
     let store1 = Store::new(&engine);
     let store2 = Store::new(&engine);
 
@@ -67,7 +67,7 @@ fn cross_store() -> anyhow::Result<()> {
     let ty = GlobalType::new(ValType::I32, Mutability::Const);
     let global = Global::new(&store2, ty, Val::I32(0))?;
     let ty = MemoryType::new(Limits::new(1, None));
-    let memory = Memory::new(&store2, ty)?;
+    let memory = Memory::new(&store2, ty);
     let ty = TableType::new(ValType::FuncRef, Limits::new(1, None));
     let table = Table::new(&store2, ty, Val::FuncRef(None))?;
 
@@ -120,16 +120,6 @@ fn cross_store() -> anyhow::Result<()> {
     assert!(s2_f.call(&[Val::FuncRef(Some(s1_f.clone()))]).is_err());
     assert!(s2_f.call(&[Val::FuncRef(Some(s2_f.clone()))]).is_ok());
 
-    let s1_f_t = s1_f.typed::<Option<Func>, ()>()?;
-    let s2_f_t = s2_f.typed::<Option<Func>, ()>()?;
-
-    assert!(s1_f_t.call(None).is_ok());
-    assert!(s2_f_t.call(None).is_ok());
-    assert!(s1_f_t.call(Some(s1_f.clone())).is_ok());
-    assert!(s1_f_t.call(Some(s2_f.clone())).is_err());
-    assert!(s2_f_t.call(Some(s1_f.clone())).is_err());
-    assert!(s2_f_t.call(Some(s2_f.clone())).is_ok());
-
     Ok(())
 }
 
@@ -137,7 +127,7 @@ fn cross_store() -> anyhow::Result<()> {
 fn get_set_externref_globals_via_api() -> anyhow::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
-    let engine = Engine::new(&cfg)?;
+    let engine = Engine::new(&cfg);
     let store = Store::new(&engine);
 
     // Initialize with a null externref.
@@ -172,7 +162,7 @@ fn get_set_externref_globals_via_api() -> anyhow::Result<()> {
 fn get_set_funcref_globals_via_api() -> anyhow::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
-    let engine = Engine::new(&cfg)?;
+    let engine = Engine::new(&cfg);
     let store = Store::new(&engine);
 
     let f = Func::wrap(&store, || {});
@@ -207,7 +197,7 @@ fn get_set_funcref_globals_via_api() -> anyhow::Result<()> {
 fn create_get_set_funcref_tables_via_api() -> anyhow::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
-    let engine = Engine::new(&cfg)?;
+    let engine = Engine::new(&cfg);
     let store = Store::new(&engine);
 
     let table_ty = TableType::new(ValType::FuncRef, Limits::at_least(10));
@@ -228,7 +218,7 @@ fn create_get_set_funcref_tables_via_api() -> anyhow::Result<()> {
 fn fill_funcref_tables_via_api() -> anyhow::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
-    let engine = Engine::new(&cfg)?;
+    let engine = Engine::new(&cfg);
     let store = Store::new(&engine);
 
     let table_ty = TableType::new(ValType::FuncRef, Limits::at_least(10));
@@ -254,7 +244,7 @@ fn fill_funcref_tables_via_api() -> anyhow::Result<()> {
 fn grow_funcref_tables_via_api() -> anyhow::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
-    let engine = Engine::new(&cfg)?;
+    let engine = Engine::new(&cfg);
     let store = Store::new(&engine);
 
     let table_ty = TableType::new(ValType::FuncRef, Limits::at_least(10));
@@ -271,7 +261,7 @@ fn grow_funcref_tables_via_api() -> anyhow::Result<()> {
 fn create_get_set_externref_tables_via_api() -> anyhow::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
-    let engine = Engine::new(&cfg)?;
+    let engine = Engine::new(&cfg);
     let store = Store::new(&engine);
 
     let table_ty = TableType::new(ValType::ExternRef, Limits::at_least(10));
@@ -302,7 +292,7 @@ fn create_get_set_externref_tables_via_api() -> anyhow::Result<()> {
 fn fill_externref_tables_via_api() -> anyhow::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
-    let engine = Engine::new(&cfg)?;
+    let engine = Engine::new(&cfg);
     let store = Store::new(&engine);
 
     let table_ty = TableType::new(ValType::ExternRef, Limits::at_least(10));
@@ -338,7 +328,7 @@ fn fill_externref_tables_via_api() -> anyhow::Result<()> {
 fn grow_externref_tables_via_api() -> anyhow::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
-    let engine = Engine::new(&cfg)?;
+    let engine = Engine::new(&cfg);
     let store = Store::new(&engine);
 
     let table_ty = TableType::new(ValType::ExternRef, Limits::at_least(10));
@@ -349,48 +339,4 @@ fn grow_externref_tables_via_api() -> anyhow::Result<()> {
     assert_eq!(table.size(), 13);
 
     Ok(())
-}
-
-#[test]
-fn read_write_memory_via_api() {
-    let cfg = Config::new();
-    let store = Store::new(&Engine::new(&cfg).unwrap());
-    let ty = MemoryType::new(Limits::new(1, None));
-    let mem = Memory::new(&store, ty).unwrap();
-    mem.grow(1).unwrap();
-
-    let value = b"hello wasm";
-    mem.write(mem.data_size() - value.len(), value).unwrap();
-
-    let mut buffer = [0u8; 10];
-    mem.read(mem.data_size() - buffer.len(), &mut buffer)
-        .unwrap();
-    assert_eq!(value, &buffer);
-
-    // Error conditions.
-
-    // Out of bounds write.
-
-    let res = mem.write(mem.data_size() - value.len() + 1, value);
-    assert!(res.is_err());
-    assert_ne!(
-        unsafe { mem.data_unchecked()[mem.data_size() - value.len() + 1] },
-        value[0],
-        "no data is written",
-    );
-
-    // Out of bounds read.
-
-    buffer[0] = 0x42;
-    let res = mem.read(mem.data_size() - buffer.len() + 1, &mut buffer);
-    assert!(res.is_err());
-    assert_eq!(buffer[0], 0x42, "no data is read");
-
-    // Read offset overflow.
-    let res = mem.read(usize::MAX, &mut buffer);
-    assert!(res.is_err());
-
-    // Write offset overflow.
-    let res = mem.write(usize::MAX, &mut buffer);
-    assert!(res.is_err());
 }

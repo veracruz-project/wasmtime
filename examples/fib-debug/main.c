@@ -71,8 +71,7 @@ int main(int argc, const char* argv[]) {
   printf("Instantiating module...\n");
   wasm_instance_t* instance = NULL;
   wasm_trap_t *trap = NULL;
-  wasm_extern_vec_t imports = WASM_EMPTY_VEC;
-  error = wasmtime_instance_new(store, module, &imports, &instance, &trap);
+  error = wasmtime_instance_new(store, module, NULL, 0, &instance, &trap);
   if (error != NULL || trap != NULL)
     exit_with_error("failed to instantiate", error, trap);
   wasm_module_delete(module);
@@ -96,11 +95,9 @@ int main(int argc, const char* argv[]) {
 
   // Call.
   printf("Calling fib...\n");
-  wasm_val_t params[1] = { WASM_I32_VAL(6) };
+  wasm_val_t params[1] = { {.kind = WASM_I32, .of = {.i32 = 6}} };
   wasm_val_t results[1];
-  wasm_val_vec_t params_vec = WASM_ARRAY_VEC(params);
-  wasm_val_vec_t results_vec = WASM_ARRAY_VEC(results);
-  error = wasmtime_func_call(run_func, &params_vec, &results_vec, &trap);
+  error = wasmtime_func_call(run_func, params, 1, results, 1, &trap);
   if (error != NULL || trap != NULL)
     exit_with_error("failed to call function", error, trap);
 

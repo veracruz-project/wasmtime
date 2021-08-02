@@ -1244,6 +1244,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(0),
             mem: AMode::reg_plus_reg(rreg(1), rreg(2), 0),
+            srcloc: None,
             bits: 32,
         },
         "41F80200",
@@ -1253,6 +1254,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(8),
             mem: AMode::reg_plus_reg(rreg(9), rreg(10), 3),
+            srcloc: None,
             bits: 32,
         },
         "49F83A80",
@@ -1262,6 +1264,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(0),
             mem: AMode::RegOffset(rreg(1), 4095),
+            srcloc: None,
             bits: 32,
         },
         "C1F8FF0F",
@@ -1271,6 +1274,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(8),
             mem: AMode::RegOffset(rreg(9), 0),
+            srcloc: None,
             bits: 32,
         },
         "C9F80080",
@@ -1280,6 +1284,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(7),
             mem: AMode::RegOffset(rreg(11), 65535),
+            srcloc: None,
             bits: 32,
         },
         "4FF6FF7C4BF80C70",
@@ -1289,6 +1294,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(10),
             mem: AMode::RegOffset(rreg(4), 16777215),
+            srcloc: None,
             bits: 32,
         },
         "4FF6FF7CC0F2FF0C44F80CA0",
@@ -1298,6 +1304,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(0),
             mem: AMode::reg_plus_reg(rreg(1), rreg(2), 0),
+            srcloc: None,
             bits: 16,
         },
         "21F80200",
@@ -1307,6 +1314,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(8),
             mem: AMode::reg_plus_reg(rreg(9), rreg(10), 2),
+            srcloc: None,
             bits: 16,
         },
         "29F82A80",
@@ -1316,6 +1324,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(0),
             mem: AMode::RegOffset(rreg(1), 3210),
+            srcloc: None,
             bits: 16,
         },
         "A1F88A0C",
@@ -1325,6 +1334,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(8),
             mem: AMode::RegOffset(rreg(9), 1),
+            srcloc: None,
             bits: 16,
         },
         "A9F80180",
@@ -1334,6 +1344,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(7),
             mem: AMode::RegOffset(rreg(11), 65535),
+            srcloc: None,
             bits: 16,
         },
         "4FF6FF7C2BF80C70",
@@ -1343,6 +1354,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(10),
             mem: AMode::RegOffset(rreg(4), 16777215),
+            srcloc: None,
             bits: 16,
         },
         "4FF6FF7CC0F2FF0C24F80CA0",
@@ -1352,6 +1364,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(0),
             mem: AMode::reg_plus_reg(rreg(1), rreg(2), 0),
+            srcloc: None,
             bits: 8,
         },
         "01F80200",
@@ -1361,6 +1374,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(8),
             mem: AMode::reg_plus_reg(rreg(9), rreg(10), 1),
+            srcloc: None,
             bits: 8,
         },
         "09F81A80",
@@ -1370,6 +1384,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(0),
             mem: AMode::RegOffset(rreg(1), 4),
+            srcloc: None,
             bits: 8,
         },
         "81F80400",
@@ -1379,6 +1394,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(8),
             mem: AMode::RegOffset(rreg(9), 777),
+            srcloc: None,
             bits: 8,
         },
         "89F80983",
@@ -1388,6 +1404,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(7),
             mem: AMode::RegOffset(rreg(11), 65535),
+            srcloc: None,
             bits: 8,
         },
         "4FF6FF7C0BF80C70",
@@ -1397,6 +1414,7 @@ fn test_arm32_emit() {
         Inst::Store {
             rt: rreg(10),
             mem: AMode::RegOffset(rreg(4), 16777215),
+            srcloc: None,
             bits: 8,
         },
         "4FF6FF7CC0F2FF0C04F80CA0",
@@ -1406,6 +1424,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(0),
             mem: AMode::reg_plus_reg(rreg(1), rreg(2), 0),
+            srcloc: None,
             bits: 32,
             sign_extend: false,
         },
@@ -1416,6 +1435,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(8),
             mem: AMode::reg_plus_reg(rreg(9), rreg(10), 1),
+            srcloc: None,
             bits: 32,
             sign_extend: false,
         },
@@ -1426,6 +1446,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(0),
             mem: AMode::RegOffset(rreg(1), 55),
+            srcloc: None,
             bits: 32,
             sign_extend: false,
         },
@@ -1436,6 +1457,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(8),
             mem: AMode::RegOffset(rreg(9), 1234),
+            srcloc: None,
             bits: 32,
             sign_extend: false,
         },
@@ -1446,6 +1468,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(7),
             mem: AMode::RegOffset(rreg(11), 9876),
+            srcloc: None,
             bits: 32,
             sign_extend: false,
         },
@@ -1456,6 +1479,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(10),
             mem: AMode::RegOffset(rreg(4), 252645135),
+            srcloc: None,
             bits: 32,
             sign_extend: false,
         },
@@ -1466,6 +1490,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(0),
             mem: AMode::PCRel(-56),
+            srcloc: None,
             bits: 32,
             sign_extend: false,
         },
@@ -1476,6 +1501,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(8),
             mem: AMode::PCRel(1024),
+            srcloc: None,
             bits: 32,
             sign_extend: false,
         },
@@ -1486,6 +1512,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(0),
             mem: AMode::reg_plus_reg(rreg(1), rreg(2), 0),
+            srcloc: None,
             bits: 16,
             sign_extend: true,
         },
@@ -1496,6 +1523,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(8),
             mem: AMode::reg_plus_reg(rreg(9), rreg(10), 2),
+            srcloc: None,
             bits: 16,
             sign_extend: false,
         },
@@ -1506,6 +1534,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(0),
             mem: AMode::RegOffset(rreg(1), 55),
+            srcloc: None,
             bits: 16,
             sign_extend: false,
         },
@@ -1516,6 +1545,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(8),
             mem: AMode::RegOffset(rreg(9), 1234),
+            srcloc: None,
             bits: 16,
             sign_extend: true,
         },
@@ -1526,6 +1556,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(7),
             mem: AMode::RegOffset(rreg(11), 9876),
+            srcloc: None,
             bits: 16,
             sign_extend: true,
         },
@@ -1536,6 +1567,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(10),
             mem: AMode::RegOffset(rreg(4), 252645135),
+            srcloc: None,
             bits: 16,
             sign_extend: false,
         },
@@ -1546,6 +1578,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(0),
             mem: AMode::PCRel(56),
+            srcloc: None,
             bits: 16,
             sign_extend: false,
         },
@@ -1556,6 +1589,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(8),
             mem: AMode::PCRel(-1000),
+            srcloc: None,
             bits: 16,
             sign_extend: true,
         },
@@ -1566,6 +1600,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(0),
             mem: AMode::reg_plus_reg(rreg(1), rreg(2), 0),
+            srcloc: None,
             bits: 8,
             sign_extend: true,
         },
@@ -1576,6 +1611,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(8),
             mem: AMode::reg_plus_reg(rreg(9), rreg(10), 3),
+            srcloc: None,
             bits: 8,
             sign_extend: false,
         },
@@ -1586,6 +1622,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(0),
             mem: AMode::RegOffset(rreg(1), 55),
+            srcloc: None,
             bits: 8,
             sign_extend: false,
         },
@@ -1596,6 +1633,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(8),
             mem: AMode::RegOffset(rreg(9), 1234),
+            srcloc: None,
             bits: 8,
             sign_extend: true,
         },
@@ -1606,6 +1644,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(7),
             mem: AMode::RegOffset(rreg(11), 9876),
+            srcloc: None,
             bits: 8,
             sign_extend: true,
         },
@@ -1616,6 +1655,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(10),
             mem: AMode::RegOffset(rreg(4), 252645135),
+            srcloc: None,
             bits: 8,
             sign_extend: false,
         },
@@ -1626,6 +1666,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(0),
             mem: AMode::PCRel(72),
+            srcloc: None,
             bits: 8,
             sign_extend: false,
         },
@@ -1636,6 +1677,7 @@ fn test_arm32_emit() {
         Inst::Load {
             rt: writable_rreg(8),
             mem: AMode::PCRel(-1234),
+            srcloc: None,
             bits: 8,
             sign_extend: true,
         },
@@ -1919,7 +1961,7 @@ fn test_arm32_emit() {
     insns.push((
         Inst::TrapIf {
             cond: Cond::Eq,
-            trap_info: TrapCode::Interrupt,
+            trap_info: (SourceLoc::default(), TrapCode::Interrupt),
         },
         "40F0018000DE",
         "bne 2 ; udf #0",
@@ -1927,14 +1969,14 @@ fn test_arm32_emit() {
     insns.push((
         Inst::TrapIf {
             cond: Cond::Hs,
-            trap_info: TrapCode::Interrupt,
+            trap_info: (SourceLoc::default(), TrapCode::Interrupt),
         },
         "C0F0018000DE",
         "blo 2 ; udf #0",
     ));
     insns.push((
         Inst::Udf {
-            trap_info: TrapCode::Interrupt,
+            trap_info: (SourceLoc::default(), TrapCode::Interrupt),
         },
         "00DE",
         "udf #0",

@@ -20,7 +20,6 @@ pub(crate) enum SpecificSetting {
 #[derive(Hash, PartialEq, Eq)]
 pub(crate) struct Setting {
     pub name: &'static str,
-    pub description: &'static str,
     pub comment: &'static str,
     pub specific: SpecificSetting,
     pub byte_offset: u8,
@@ -89,7 +88,6 @@ impl Into<PresetType> for PresetIndex {
 #[derive(Hash, PartialEq, Eq)]
 pub(crate) struct Preset {
     pub name: &'static str,
-    pub description: &'static str,
     values: Vec<BoolSettingIndex>,
 }
 
@@ -171,7 +169,6 @@ pub(crate) enum ProtoSpecificSetting {
 /// This is the information provided during building for a setting.
 struct ProtoSetting {
     name: &'static str,
-    description: &'static str,
     comment: &'static str,
     specific: ProtoSpecificSetting,
 }
@@ -254,13 +251,11 @@ impl SettingGroupBuilder {
     fn add_setting(
         &mut self,
         name: &'static str,
-        description: &'static str,
         comment: &'static str,
         specific: ProtoSpecificSetting,
     ) {
         self.settings.push(ProtoSetting {
             name,
-            description,
             comment,
             specific,
         })
@@ -269,7 +264,6 @@ impl SettingGroupBuilder {
     pub fn add_bool(
         &mut self,
         name: &'static str,
-        description: &'static str,
         comment: &'static str,
         default: bool,
     ) -> BoolSettingIndex {
@@ -277,55 +271,28 @@ impl SettingGroupBuilder {
             self.predicates.is_empty(),
             "predicates must be added after the boolean settings"
         );
-        self.add_setting(
-            name,
-            description,
-            comment,
-            ProtoSpecificSetting::Bool(default),
-        );
+        self.add_setting(name, comment, ProtoSpecificSetting::Bool(default));
         BoolSettingIndex(self.settings.len() - 1)
     }
 
     pub fn add_enum(
         &mut self,
         name: &'static str,
-        description: &'static str,
         comment: &'static str,
         values: Vec<&'static str>,
     ) {
-        self.add_setting(
-            name,
-            description,
-            comment,
-            ProtoSpecificSetting::Enum(values),
-        );
+        self.add_setting(name, comment, ProtoSpecificSetting::Enum(values));
     }
 
-    pub fn add_num(
-        &mut self,
-        name: &'static str,
-        description: &'static str,
-        comment: &'static str,
-        default: u8,
-    ) {
-        self.add_setting(
-            name,
-            description,
-            comment,
-            ProtoSpecificSetting::Num(default),
-        );
+    pub fn add_num(&mut self, name: &'static str, comment: &'static str, default: u8) {
+        self.add_setting(name, comment, ProtoSpecificSetting::Num(default));
     }
 
     pub fn add_predicate(&mut self, name: &'static str, node: PredicateNode) {
         self.predicates.push(ProtoPredicate { name, node });
     }
 
-    pub fn add_preset(
-        &mut self,
-        name: &'static str,
-        description: &'static str,
-        args: Vec<PresetType>,
-    ) -> PresetIndex {
+    pub fn add_preset(&mut self, name: &'static str, args: Vec<PresetType>) -> PresetIndex {
         let mut values = Vec::new();
         for arg in args {
             match arg {
@@ -335,11 +302,7 @@ impl SettingGroupBuilder {
                 PresetType::BoolSetting(index) => values.push(index),
             }
         }
-        self.presets.push(Preset {
-            name,
-            description,
-            values,
-        });
+        self.presets.push(Preset { name, values });
         PresetIndex(self.presets.len() - 1)
     }
 
@@ -384,7 +347,6 @@ impl SettingGroupBuilder {
 
             group.settings.push(Setting {
                 name: s.name,
-                description: s.description,
                 comment: s.comment,
                 byte_offset,
                 specific,
@@ -405,7 +367,6 @@ impl SettingGroupBuilder {
             };
             group.settings.push(Setting {
                 name: s.name,
-                description: s.description,
                 comment: s.comment,
                 byte_offset: byte_offset + predicate_number / 8,
                 specific: SpecificSetting::Bool(BoolSetting {

@@ -174,6 +174,7 @@ fn convert_operand(
                     }
                     Some(format!("{}", convert_name(&assn.name)))
                 }
+                ast::AssignmentRhs::Constant(c) => Some(format!("{}", c.value)),
                 ast::AssignmentRhs::Instruction(inst) => match inst {
                     // Unsupported instructions.
                     ast::Instruction::Bswap { .. }
@@ -618,7 +619,8 @@ mod tests {
             "
                 %0:i64 = var
                 %1:i32 = trunc %0
-                cand %1 0
+                %2:i32 = 0
+                cand %1 %2
             ",
             "\
 (=> (when (ireduce {i32} $v0)
@@ -629,7 +631,8 @@ mod tests {
             "
                 %0:i32 = var
                 %1:i64 = sext %0
-                cand %1 0
+                %2:i64 = 0
+                cand %1 %2
             ",
             "\
 (=> (when (sextend {i64} $v0)
@@ -640,7 +643,8 @@ mod tests {
             "
                 %0:i32 = var
                 %1:i64 = zext %0
-                cand %1 0
+                %2:i64 = 0
+                cand %1 %2
             ",
             "\
 (=> (when (uextend {i64} $v0)
@@ -673,7 +677,8 @@ mod tests {
                 %1:i32 = var
                 %2:i1 = eq %0, %1
                 %3:i32 = zext %2
-                cand %3 0
+                %4:i32 = 0
+                cand %3 %4
             ",
             "\
 (=> (when (bint (icmp eq $v0 $v1))
@@ -688,7 +693,8 @@ mod tests {
             "
                 %0:i32 = var
                 %1:i32 = add %0, 1
-                cand %1 0
+                %2:i32 = 0
+                cand %1 %2
             ",
             "\
 (=> (when (iadd_imm 1 $v0)
@@ -699,7 +705,8 @@ mod tests {
             "
                 %0:i32 = var
                 %1:i32 = add 1, %0
-                cand %1 0
+                %2:i32 = 0
+                cand %1 %2
             ",
             "\
 (=> (when (iadd_imm 1 $v0)

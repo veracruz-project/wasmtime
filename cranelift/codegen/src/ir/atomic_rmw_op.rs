@@ -14,22 +14,12 @@ pub enum AtomicRmwOp {
     Sub,
     /// And
     And,
-    /// Nand
-    Nand,
     /// Or
     Or,
     /// Xor
     Xor,
     /// Exchange
     Xchg,
-    /// Unsigned min
-    Umin,
-    /// Unsigned max
-    Umax,
-    /// Signed min
-    Smin,
-    /// Signed max
-    Smax,
 }
 
 impl Display for AtomicRmwOp {
@@ -38,14 +28,9 @@ impl Display for AtomicRmwOp {
             AtomicRmwOp::Add => "add",
             AtomicRmwOp::Sub => "sub",
             AtomicRmwOp::And => "and",
-            AtomicRmwOp::Nand => "nand",
             AtomicRmwOp::Or => "or",
             AtomicRmwOp::Xor => "xor",
             AtomicRmwOp::Xchg => "xchg",
-            AtomicRmwOp::Umin => "umin",
-            AtomicRmwOp::Umax => "umax",
-            AtomicRmwOp::Smin => "smin",
-            AtomicRmwOp::Smax => "smax",
         };
         f.write_str(s)
     }
@@ -58,14 +43,9 @@ impl FromStr for AtomicRmwOp {
             "add" => Ok(AtomicRmwOp::Add),
             "sub" => Ok(AtomicRmwOp::Sub),
             "and" => Ok(AtomicRmwOp::And),
-            "nand" => Ok(AtomicRmwOp::Nand),
             "or" => Ok(AtomicRmwOp::Or),
             "xor" => Ok(AtomicRmwOp::Xor),
             "xchg" => Ok(AtomicRmwOp::Xchg),
-            "umin" => Ok(AtomicRmwOp::Umin),
-            "umax" => Ok(AtomicRmwOp::Umax),
-            "smin" => Ok(AtomicRmwOp::Smin),
-            "smax" => Ok(AtomicRmwOp::Smax),
             _ => Err(()),
         }
     }

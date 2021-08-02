@@ -1,7 +1,5 @@
-use serde::{Deserialize, Serialize};
-
 /// Tunable parameters for WebAssembly compilation.
-#[derive(Clone, Hash, Serialize, Deserialize)]
+#[derive(Clone, Hash)]
 pub struct Tunables {
     /// For static heaps, the size in wasm pages of the heap protected by bounds checking.
     pub static_memory_bound: u32,
@@ -12,11 +10,8 @@ pub struct Tunables {
     /// The size in bytes of the offset guard for dynamic heaps.
     pub dynamic_memory_offset_guard_size: u64,
 
-    /// Whether or not to generate native DWARF debug information.
-    pub generate_native_debuginfo: bool,
-
-    /// Whether or not to retain DWARF sections in compiled modules.
-    pub parse_wasm_debuginfo: bool,
+    /// Whether or not to generate DWARF debug information.
+    pub debug_info: bool,
 
     /// Whether or not to enable the ability to interrupt wasm code dynamically.
     ///
@@ -25,13 +20,6 @@ pub struct Tunables {
     /// calls and interrupts are implemented through the `VMInterrupts`
     /// structure, or `InterruptHandle` in the `wasmtime` crate.
     pub interruptable: bool,
-
-    /// Whether or not fuel is enabled for generated code, meaning that fuel
-    /// will be consumed every time a wasm instruction is executed.
-    pub consume_fuel: bool,
-
-    /// Whether or not to treat the static memory bound as the maximum for unbounded heaps.
-    pub static_memory_bound_is_maximum: bool,
 }
 
 impl Default for Tunables {
@@ -63,11 +51,8 @@ impl Default for Tunables {
             /// wasting too much memory.
             dynamic_memory_offset_guard_size: 0x1_0000,
 
-            generate_native_debuginfo: false,
-            parse_wasm_debuginfo: true,
+            debug_info: false,
             interruptable: false,
-            consume_fuel: false,
-            static_memory_bound_is_maximum: false,
         }
     }
 }

@@ -1,4 +1,5 @@
 #![cfg_attr(test, feature(test))]
+#![feature(proc_macro_hygiene)]
 
 #[cfg(test)]
 extern crate test;

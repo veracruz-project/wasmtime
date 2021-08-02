@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "windows"))]
 mod tests {
     use anyhow::Result;
     use std::rc::Rc;
@@ -41,8 +41,8 @@ mod tests {
 )
 "#;
 
-    fn invoke_export(instance: &Instance, func_name: &str) -> Result<i32> {
-        let ret = instance.get_typed_func::<(), i32>(func_name)?.call(())?;
+    fn invoke_export(instance: &Instance, func_name: &str) -> Result<Box<[Val]>> {
+        let ret = instance.get_func(func_name).unwrap().call(&[])?;
         Ok(ret)
     }
 
@@ -94,7 +94,7 @@ mod tests {
         module
             .imports()
             .map(|import| {
-                assert_eq!(Some("hostcall_read"), import.name());
+                assert_eq!("hostcall_read", import.name());
                 let func = Func::wrap(&store, {
                     move |caller: Caller<'_>| {
                         let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
@@ -112,7 +112,7 @@ mod tests {
     // hostcall can be handled.
     #[test]
     fn test_custom_signal_handler_single_instance_hostcall() -> Result<()> {
-        let engine = Engine::new(&Config::default())?;
+        let engine = Engine::new(&Config::default());
         let store = Store::new(&engine);
         let module = Module::new(&engine, WAT1)?;
 
@@ -126,13 +126,13 @@ mod tests {
         }
         println!("calling hostcall_read...");
         let result = invoke_export(&instance, "hostcall_read").unwrap();
-        assert_eq!(123, result);
+        assert_eq!(123, result[0].unwrap_i32());
         Ok(())
     }
 
     #[test]
     fn test_custom_signal_handler_single_instance() -> Result<()> {
-        let engine = Engine::new(&Config::default())?;
+        let engine = Engine::new(&Config::default());
         let store = Store::new(&engine);
         let module = Module::new(&engine, WAT1)?;
 
@@ -149,7 +149,7 @@ mod tests {
         {
             println!("calling read...");
             let result = invoke_export(&instance, "read").expect("read succeeded");
-            assert_eq!(123, result);
+            assert_eq!(123, result[0].unwrap_i32());
         }
 
         {
@@ -167,17 +167,23 @@ mod tests {
 
         // these invoke wasmtime_call_trampoline from callable.rs
         {
-            let read_func = instance.get_typed_func::<(), i32>("read")?;
+            let read_func = instance
+                .get_func("read")
+                .expect("expected a 'read' func in the module");
             println!("calling read...");
-            let result = read_func.call(()).expect("expected function not to trap");
-            assert_eq!(123i32, result);
+            let result = read_func.call(&[]).expect("expected function not to trap");
+            assert_eq!(123i32, result[0].clone().unwrap_i32());
         }
 
         {
-            let read_out_of_bounds_func =
-                instance.get_typed_func::<(), i32>("read_out_of_bounds")?;
+            let read_out_of_bounds_func = instance
+                .get_func("read_out_of_bounds")
+                .expect("expected a 'read_out_of_bounds' func in the module");
             println!("calling read_out_of_bounds...");
-            let trap = read_out_of_bounds_func.call(()).unwrap_err();
+            let trap = read_out_of_bounds_func
+                .call(&[])
+                .unwrap_err()
+                .downcast::<Trap>()?;
             assert!(trap
                 .to_string()
                 .contains("wasm trap: out of bounds memory access"));
@@ -187,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_custom_signal_handler_multiple_instances() -> Result<()> {
-        let engine = Engine::new(&Config::default())?;
+        let engine = Engine::new(&Config::default());
         let store = Store::new(&engine);
         let module = Module::new(&engine, WAT1)?;
 
@@ -227,7 +233,7 @@ mod tests {
 
             println!("calling instance1.read...");
             let result = invoke_export(&instance1, "read").expect("read succeeded");
-            assert_eq!(123, result);
+            assert_eq!(123, result[0].unwrap_i32());
             assert_eq!(
                 instance1_handler_triggered.load(Ordering::SeqCst),
                 true,
@@ -268,7 +274,7 @@ mod tests {
 
             println!("calling instance2.read...");
             let result = invoke_export(&instance2, "read").expect("read succeeded");
-            assert_eq!(123, result);
+            assert_eq!(123, result[0].unwrap_i32());
             assert_eq!(
                 instance2_handler_triggered.load(Ordering::SeqCst),
                 true,
@@ -280,7 +286,7 @@ mod tests {
 
     #[test]
     fn test_custom_signal_handler_instance_calling_another_instance() -> Result<()> {
-        let engine = Engine::new(&Config::default())?;
+        let engine = Engine::new(&Config::default());
         let store = Store::new(&engine);
 
         // instance1 which defines 'read'
@@ -310,7 +316,7 @@ mod tests {
 
         println!("calling instance2.run");
         let result = invoke_export(&instance2, "run")?;
-        assert_eq!(123, result);
+        assert_eq!(123, result[0].unwrap_i32());
         Ok(())
     }
 }

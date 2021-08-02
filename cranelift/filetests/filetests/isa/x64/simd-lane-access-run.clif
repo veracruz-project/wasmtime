@@ -1,6 +1,7 @@
 test run
 set enable_simd
-target x86_64 machinst
+target x86_64
+feature "experimental_x64"
 
 ;; shuffle
 

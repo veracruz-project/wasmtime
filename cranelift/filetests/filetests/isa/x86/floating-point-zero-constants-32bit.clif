@@ -1,6 +1,6 @@
 ; Check that floating-point and integer constants equal to zero are optimized correctly.
 test binemit
-target i686 legacy
+target i686
 
 function %foo() -> f32 fast {
 block0:

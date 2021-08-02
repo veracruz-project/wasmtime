@@ -78,7 +78,7 @@ pub fn build_dependencies<R: Reader<Offset = usize>>(
 }
 
 fn build_unit_dependencies<R: Reader<Offset = usize>>(
-    header: read::UnitHeader<R>,
+    header: read::CompilationUnitHeader<R>,
     dwarf: &read::Dwarf<R>,
     at: &AddressTransform,
     deps: &mut Dependencies,

@@ -1,6 +1,7 @@
 //! Interfacing with actual instructions.
 
 use crate::part::{Constant, Part};
+use crate::paths::Path;
 use crate::r#type::Type;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -53,22 +54,26 @@ pub unsafe trait InstructionSet<'a> {
         new: Part<Self::Instruction>,
     ) -> Self::Instruction;
 
+    /// Get the instruction, constant, or condition code at the given path.
+    ///
+    /// If there is no such entity at the given path (e.g. we run into a
+    /// function parameter and can't traverse the path any further) then `None`
+    /// should be returned.
+    fn get_part_at_path(
+        &self,
+        context: &mut Self::Context,
+        root: Self::Instruction,
+        path: Path,
+    ) -> Option<Part<Self::Instruction>>;
+
     /// Get the given instruction's operator.
     ///
     /// If the instruction isn't supported, then `None` should be returned.
-    ///
-    /// Additionally, if `Some` is returned, then the instruction's operands
-    /// must be pushed in order into `operands`. E.g. calling this method on
-    /// `(iadd $x $y)` would return `Some(iadd)` and extend `operands` with
-    /// `[$x, $y]`.
-    fn operator<E>(
+    fn operator(
         &self,
         context: &mut Self::Context,
         instr: Self::Instruction,
-        operands: &mut E,
-    ) -> Option<Self::Operator>
-    where
-        E: Extend<Part<Self::Instruction>>;
+    ) -> Option<Self::Operator>;
 
     /// Make a unary instruction.
     ///

@@ -1,5 +1,4 @@
 test compile
-set unwind_info=false
 target aarch64
 
 function %add8(i8, i8) -> i8 {
@@ -11,6 +10,7 @@ block0(v0: i8, v1: i8):
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
 ; nextln: add w0, w0, w1
+; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
 
@@ -23,6 +23,7 @@ block0(v0: i16, v1: i16):
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
 ; nextln: add w0, w0, w1
+; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
 
@@ -35,6 +36,7 @@ block0(v0: i32, v1: i32):
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
 ; nextln: add w0, w0, w1
+; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
 
@@ -48,6 +50,7 @@ block0(v0: i32, v1: i8):
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
 ; nextln: add w0, w0, w1, SXTB
+; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
 
@@ -61,5 +64,6 @@ block0(v0: i64, v1: i32):
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
 ; nextln: add x0, x0, x1, SXTW
+; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret

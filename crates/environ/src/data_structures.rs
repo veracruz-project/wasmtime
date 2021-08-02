@@ -3,16 +3,14 @@
 pub mod ir {
     pub use cranelift_codegen::binemit::{Reloc, StackMap};
     pub use cranelift_codegen::ir::{
-        types, AbiParam, ArgumentPurpose, Endianness, JumpTableOffsets, LabelValueLoc, LibCall,
-        Signature, SourceLoc, StackSlots, TrapCode, Type, ValueLabel, ValueLoc,
+        types, AbiParam, ArgumentPurpose, JumpTableOffsets, LibCall, Signature, SourceLoc,
+        StackSlots, TrapCode, Type, ValueLabel, ValueLoc,
     };
     pub use cranelift_codegen::{ValueLabelsRanges, ValueLocRange};
 }
 
 pub mod settings {
-    pub use cranelift_codegen::settings::{
-        builder, Builder, Configurable, Flags, OptLevel, SetError, Setting, SettingKind, Value,
-    };
+    pub use cranelift_codegen::settings::{builder, Builder, Configurable, Flags, SetError};
 }
 
 pub mod isa {
@@ -22,9 +20,13 @@ pub mod isa {
 }
 
 pub mod entity {
-    pub use cranelift_entity::{packed_option, BoxedSlice, EntityRef, EntitySet, PrimaryMap};
+    pub use cranelift_entity::{packed_option, BoxedSlice, EntityRef, PrimaryMap};
 }
 
 pub mod wasm {
-    pub use cranelift_wasm::*;
+    pub use cranelift_wasm::{
+        get_vmctx_value_label, DataIndex, DefinedFuncIndex, DefinedGlobalIndex, DefinedMemoryIndex,
+        DefinedTableIndex, ElemIndex, FuncIndex, Global, GlobalIndex, GlobalInit, Memory,
+        MemoryIndex, SignatureIndex, Table, TableElementType, TableIndex, WasmFuncType, WasmType,
+    };
 }

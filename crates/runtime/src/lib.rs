@@ -13,8 +13,9 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::map_unwrap_or,
-        clippy::clippy::print_stdout,
+        clippy::option_map_unwrap_or,
+        clippy::option_map_unwrap_or_else,
+        clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
@@ -27,6 +28,7 @@ mod instance;
 mod jit_int;
 mod memory;
 mod mmap;
+mod sig_registry;
 mod table;
 mod traphandlers;
 mod vmcontext;
@@ -37,18 +39,14 @@ pub mod libcalls;
 pub use crate::export::*;
 pub use crate::externref::*;
 pub use crate::imports::Imports;
-pub use crate::instance::{
-    InstanceAllocationRequest, InstanceAllocator, InstanceHandle, InstanceLimits,
-    InstantiationError, LinkError, ModuleLimits, OnDemandInstanceAllocator,
-    PoolingAllocationStrategy, PoolingInstanceAllocator, ResourceLimiter, RuntimeInstance,
-};
+pub use crate::instance::{InstanceHandle, InstantiationError, LinkError};
 pub use crate::jit_int::GdbJitImageRegistration;
-pub use crate::memory::{Memory, RuntimeLinearMemory, RuntimeMemoryCreator};
+pub use crate::memory::{RuntimeLinearMemory, RuntimeMemoryCreator};
 pub use crate::mmap::Mmap;
+pub use crate::sig_registry::SignatureRegistry;
 pub use crate::table::{Table, TableElement};
 pub use crate::traphandlers::{
-    catch_traps, init_traps, raise_lib_trap, raise_user_trap, resume_panic, with_last_info,
-    SignalHandler, TlsRestore, Trap, TrapInfo,
+    catch_traps, init_traps, raise_lib_trap, raise_user_trap, resume_panic, SignalHandler, Trap,
 };
 pub use crate::vmcontext::{
     VMCallerCheckedAnyfunc, VMContext, VMFunctionBody, VMFunctionImport, VMGlobalDefinition,

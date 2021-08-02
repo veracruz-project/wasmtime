@@ -2,7 +2,6 @@ use capstone::prelude::*;
 use dynasmrt::AssemblyOffset;
 use std::error::Error;
 use std::fmt::{Display, Write};
-use std::io;
 
 pub fn disassemble<D: Display>(
     mem: &[u8],
@@ -11,11 +10,10 @@ pub fn disassemble<D: Display>(
     let cs = Capstone::new()
         .x86()
         .mode(arch::x86::ArchMode::Mode64)
-        .build()
-        .map_err(map_caperr)?;
+        .build()?;
 
     println!("{} bytes:", mem.len());
-    let insns = cs.disasm_all(&mem, 0x0).map_err(map_caperr)?;
+    let insns = cs.disasm_all(&mem, 0x0)?;
     for i in insns.iter() {
         let mut line = String::new();
 
@@ -50,8 +48,4 @@ pub fn disassemble<D: Display>(
     }
 
     Ok(())
-}
-
-fn map_caperr(err: capstone::Error) -> Box<dyn Error> {
-    Box::new(io::Error::new(io::ErrorKind::Other, err.to_string()))
 }

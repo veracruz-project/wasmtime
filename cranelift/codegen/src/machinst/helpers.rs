@@ -1,9 +1,8 @@
 //! Miscellaneous helpers for machine backends.
 
-use super::{InsnOutput, LowerCtx, VCodeInst, ValueRegs};
+use super::{InsnOutput, LowerCtx, VCodeInst};
 use crate::ir::Type;
 use regalloc::{Reg, Writable};
-use std::ops::{Add, BitAnd, Not, Sub};
 
 /// Returns the size (in bits) of a given type.
 pub fn ty_bits(ty: Type) -> usize {
@@ -24,20 +23,6 @@ pub(crate) fn ty_has_float_or_vec_representation(ty: Type) -> bool {
 pub(crate) fn get_output_reg<I: VCodeInst, C: LowerCtx<I = I>>(
     ctx: &mut C,
     spec: InsnOutput,
-) -> ValueRegs<Writable<Reg>> {
+) -> Writable<Reg> {
     ctx.get_output(spec.insn, spec.output)
-}
-
-/// Align a size up to a power-of-two alignment.
-pub(crate) fn align_to<N>(x: N, alignment: N) -> N
-where
-    N: Not<Output = N>
-        + BitAnd<N, Output = N>
-        + Add<N, Output = N>
-        + Sub<N, Output = N>
-        + From<u8>
-        + Copy,
-{
-    let alignment_mask = alignment - 1.into();
-    (x + alignment_mask) & !alignment_mask
 }

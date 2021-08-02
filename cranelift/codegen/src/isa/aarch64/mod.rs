@@ -2,14 +2,16 @@
 
 use crate::ir::condcodes::IntCC;
 use crate::ir::Function;
-use crate::isa::aarch64::settings as aarch64_settings;
 use crate::isa::Builder as IsaBuilder;
-use crate::machinst::{compile, MachBackend, MachCompileResult, TargetIsaAdapter, VCode};
+use crate::machinst::{
+    compile, MachBackend, MachCompileResult, ShowWithRRU, TargetIsaAdapter, VCode,
+};
 use crate::result::CodegenResult;
-use crate::settings as shared_settings;
-use alloc::{boxed::Box, vec::Vec};
-use core::hash::{Hash, Hasher};
-use regalloc::{PrettyPrint, RealRegUniverse};
+use crate::settings;
+
+use alloc::boxed::Box;
+
+use regalloc::RealRegUniverse;
 use target_lexicon::{Aarch64Architecture, Architecture, Triple};
 
 // New backend:
@@ -17,32 +19,23 @@ mod abi;
 pub(crate) mod inst;
 mod lower;
 mod lower_inst;
-mod settings;
 
 use inst::create_reg_universe;
-
-use self::inst::EmitInfo;
 
 /// An AArch64 backend.
 pub struct AArch64Backend {
     triple: Triple,
-    flags: shared_settings::Flags,
-    isa_flags: aarch64_settings::Flags,
+    flags: settings::Flags,
     reg_universe: RealRegUniverse,
 }
 
 impl AArch64Backend {
     /// Create a new AArch64 backend with the given (shared) flags.
-    pub fn new_with_flags(
-        triple: Triple,
-        flags: shared_settings::Flags,
-        isa_flags: aarch64_settings::Flags,
-    ) -> AArch64Backend {
+    pub fn new_with_flags(triple: Triple, flags: settings::Flags) -> AArch64Backend {
         let reg_universe = create_reg_universe(&flags);
         AArch64Backend {
             triple,
             flags,
-            isa_flags,
             reg_universe,
         }
     }
@@ -52,11 +45,10 @@ impl AArch64Backend {
     fn compile_vcode(
         &self,
         func: &Function,
-        flags: shared_settings::Flags,
+        flags: settings::Flags,
     ) -> CodegenResult<VCode<inst::Inst>> {
-        let emit_info = EmitInfo::new(flags.clone());
         let abi = Box::new(abi::AArch64ABICallee::new(func, flags)?);
-        compile::compile::<AArch64Backend>(func, self, abi, emit_info)
+        compile::compile::<AArch64Backend>(func, self, abi)
     }
 }
 
@@ -68,10 +60,8 @@ impl MachBackend for AArch64Backend {
     ) -> CodegenResult<MachCompileResult> {
         let flags = self.flags();
         let vcode = self.compile_vcode(func, flags.clone())?;
-
         let buffer = vcode.emit();
         let frame_size = vcode.frame_size();
-        let stackslot_offsets = vcode.stackslot_offsets().clone();
 
         let disasm = if want_disasm {
             Some(vcode.show_rru(Some(&create_reg_universe(flags))))
@@ -85,8 +75,6 @@ impl MachBackend for AArch64Backend {
             buffer,
             frame_size,
             disasm,
-            value_labels_ranges: Default::default(),
-            stackslot_offsets,
         })
     }
 
@@ -98,17 +86,8 @@ impl MachBackend for AArch64Backend {
         self.triple.clone()
     }
 
-    fn flags(&self) -> &shared_settings::Flags {
+    fn flags(&self) -> &settings::Flags {
         &self.flags
-    }
-
-    fn isa_flags(&self) -> Vec<shared_settings::Value> {
-        self.isa_flags.iter().collect()
-    }
-
-    fn hash_all_flags(&self, mut hasher: &mut dyn Hasher) {
-        self.flags.hash(&mut hasher);
-        self.isa_flags.hash(&mut hasher);
     }
 
     fn reg_universe(&self) -> &RealRegUniverse {
@@ -127,38 +106,6 @@ impl MachBackend for AArch64Backend {
         // opposite of x86).
         IntCC::UnsignedLessThan
     }
-
-    #[cfg(feature = "unwind")]
-    fn emit_unwind_info(
-        &self,
-        result: &MachCompileResult,
-        kind: crate::machinst::UnwindInfoKind,
-    ) -> CodegenResult<Option<crate::isa::unwind::UnwindInfo>> {
-        use crate::isa::unwind::UnwindInfo;
-        use crate::machinst::UnwindInfoKind;
-        Ok(match kind {
-            UnwindInfoKind::SystemV => {
-                let mapper = self::inst::unwind::systemv::RegisterMapper;
-                Some(UnwindInfo::SystemV(
-                    crate::isa::unwind::systemv::create_unwind_info_from_insts(
-                        &result.buffer.unwind_info[..],
-                        result.buffer.data.len(),
-                        &mapper,
-                    )?,
-                ))
-            }
-            UnwindInfoKind::Windows => {
-                // TODO: support Windows unwind info on AArch64
-                None
-            }
-            _ => None,
-        })
-    }
-
-    #[cfg(feature = "unwind")]
-    fn create_systemv_cie(&self) -> Option<gimli::write::CommonInformationEntry> {
-        Some(inst::unwind::systemv::create_cie())
-    }
 }
 
 /// Create a new `isa::Builder`.
@@ -166,10 +113,9 @@ pub fn isa_builder(triple: Triple) -> IsaBuilder {
     assert!(triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64));
     IsaBuilder {
         triple,
-        setup: aarch64_settings::builder(),
-        constructor: |triple, shared_flags, builder| {
-            let isa_flags = aarch64_settings::Flags::new(&shared_flags, builder);
-            let backend = AArch64Backend::new_with_flags(triple, shared_flags, isa_flags);
+        setup: settings::builder(),
+        constructor: |triple, shared_flags, _| {
+            let backend = AArch64Backend::new_with_flags(triple, shared_flags);
             Box::new(TargetIsaAdapter::new(backend))
         },
     }
@@ -204,14 +150,11 @@ mod test {
         let v1 = pos.ins().iadd(arg0, v0);
         pos.ins().return_(&[v1]);
 
-        let mut shared_flags_builder = settings::builder();
-        shared_flags_builder.set("opt_level", "none").unwrap();
-        let shared_flags = settings::Flags::new(shared_flags_builder);
-        let isa_flags = aarch64_settings::Flags::new(&shared_flags, aarch64_settings::builder());
+        let mut shared_flags = settings::builder();
+        shared_flags.set("opt_level", "none").unwrap();
         let backend = AArch64Backend::new_with_flags(
             Triple::from_str("aarch64").unwrap(),
-            shared_flags,
-            isa_flags,
+            settings::Flags::new(shared_flags),
         );
         let buffer = backend.compile_function(&mut func, false).unwrap().buffer;
         let code = &buffer.data[..];
@@ -220,11 +163,12 @@ mod test {
         // mov x29, sp
         // mov x1, #0x1234
         // add w0, w0, w1
+        // mov sp, x29
         // ldp x29, x30, [sp], #16
         // ret
         let golden = vec![
             0xfd, 0x7b, 0xbf, 0xa9, 0xfd, 0x03, 0x00, 0x91, 0x81, 0x46, 0x82, 0xd2, 0x00, 0x00,
-            0x01, 0x0b, 0xfd, 0x7b, 0xc1, 0xa8, 0xc0, 0x03, 0x5f, 0xd6,
+            0x01, 0x0b, 0xbf, 0x03, 0x00, 0x91, 0xfd, 0x7b, 0xc1, 0xa8, 0xc0, 0x03, 0x5f, 0xd6,
         ];
 
         assert_eq!(code, &golden[..]);
@@ -261,14 +205,11 @@ mod test {
         let v3 = pos.ins().isub(v1, v0);
         pos.ins().return_(&[v3]);
 
-        let mut shared_flags_builder = settings::builder();
-        shared_flags_builder.set("opt_level", "none").unwrap();
-        let shared_flags = settings::Flags::new(shared_flags_builder);
-        let isa_flags = aarch64_settings::Flags::new(&shared_flags, aarch64_settings::builder());
+        let mut shared_flags = settings::builder();
+        shared_flags.set("opt_level", "none").unwrap();
         let backend = AArch64Backend::new_with_flags(
             Triple::from_str("aarch64").unwrap(),
-            shared_flags,
-            isa_flags,
+            settings::Flags::new(shared_flags),
         );
         let result = backend
             .compile_function(&mut func, /* want_disasm = */ false)
@@ -289,13 +230,14 @@ mod test {
         // cbnz	x1, 0x18
         // mov	x1, #0x1234                	// #4660
         // sub	w0, w0, w1
+        // mov	sp, x29
         // ldp	x29, x30, [sp], #16
         // ret
         let golden = vec![
             253, 123, 191, 169, 253, 3, 0, 145, 129, 70, 130, 210, 0, 0, 1, 11, 225, 3, 0, 42, 161,
             0, 0, 181, 129, 70, 130, 210, 1, 0, 1, 11, 225, 3, 1, 42, 161, 255, 255, 181, 225, 3,
-            0, 42, 97, 255, 255, 181, 129, 70, 130, 210, 0, 0, 1, 75, 253, 123, 193, 168, 192, 3,
-            95, 214,
+            0, 42, 97, 255, 255, 181, 129, 70, 130, 210, 0, 0, 1, 75, 191, 3, 0, 145, 253, 123,
+            193, 168, 192, 3, 95, 214,
         ];
 
         assert_eq!(code, &golden[..]);

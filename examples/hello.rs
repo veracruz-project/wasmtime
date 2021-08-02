@@ -34,11 +34,14 @@ fn main() -> Result<()> {
 
     // Next we poke around a bit to extract the `run` function from the module.
     println!("Extracting export...");
-    let run = instance.get_typed_func::<(), ()>("run")?;
+    let run = instance
+        .get_func("run")
+        .ok_or(anyhow::format_err!("failed to find `run` function export"))?
+        .get0::<()>()?;
 
     // And last but not least we can call it!
     println!("Calling export...");
-    run.call(())?;
+    run()?;
 
     println!("Done.");
     Ok(())

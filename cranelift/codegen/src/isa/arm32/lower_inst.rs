@@ -5,12 +5,12 @@ use crate::ir::Inst as IRInst;
 use crate::ir::Opcode;
 use crate::machinst::lower::*;
 use crate::machinst::*;
-use crate::settings::Flags;
 use crate::CodegenResult;
 
 use crate::isa::arm32::abi::*;
 use crate::isa::arm32::inst::*;
 
+use regalloc::RegClass;
 use smallvec::SmallVec;
 
 use super::lower::*;
@@ -19,7 +19,6 @@ use super::lower::*;
 pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
     ctx: &mut C,
     insn: IRInst,
-    flags: &Flags,
 ) -> CodegenResult<()> {
     let op = ctx.data(insn).opcode();
     let inputs: SmallVec<[InsnInput; 4]> = (0..ctx.num_inputs(insn))
@@ -85,12 +84,14 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 shift: None,
             });
         }
-        Opcode::Imul | Opcode::Udiv | Opcode::Sdiv => {
+        Opcode::SaddSat | Opcode::SsubSat | Opcode::Imul | Opcode::Udiv | Opcode::Sdiv => {
             let rd = output_to_reg(ctx, outputs[0]);
             let rn = input_to_reg(ctx, inputs[0], NarrowValueMode::None);
             let rm = input_to_reg(ctx, inputs[1], NarrowValueMode::None);
 
             let alu_op = match op {
+                Opcode::SaddSat => ALUOp::Qadd,
+                Opcode::SsubSat => ALUOp::Qsub,
                 Opcode::Imul => ALUOp::Mul,
                 Opcode::Udiv => ALUOp::Udiv,
                 Opcode::Sdiv => ALUOp::Sdiv,
@@ -142,7 +143,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             let rd = output_to_reg(ctx, outputs[0]);
             let rn = input_to_reg(ctx, inputs[0], NarrowValueMode::None);
             let rm = input_to_reg(ctx, inputs[1], NarrowValueMode::None);
-            let tmp = ctx.alloc_tmp(I32).only_reg().unwrap();
+            let tmp = ctx.alloc_tmp(RegClass::I32, I32);
 
             // ror rd, rn, 32 - (rm & 31)
             ctx.emit(Inst::AluRRImm8 {
@@ -170,7 +171,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             match ty {
                 I32 => {
                     let rd_hi = output_to_reg(ctx, outputs[0]);
-                    let rd_lo = ctx.alloc_tmp(ty).only_reg().unwrap();
+                    let rd_lo = ctx.alloc_tmp(RegClass::I32, ty);
                     let rn = input_to_reg(ctx, inputs[0], NarrowValueMode::None);
                     let rm = input_to_reg(ctx, inputs[1], NarrowValueMode::None);
 
@@ -315,7 +316,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
         }
         Opcode::Trueif => {
             let cmp_insn = ctx
-                .get_input_as_source_or_const(inputs[0].insn, inputs[0].input)
+                .get_input(inputs[0].insn, inputs[0].input)
                 .inst
                 .unwrap()
                 .0;
@@ -343,7 +344,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             } else {
                 // Verification ensures that the input is always a single-def ifcmp.
                 let cmp_insn = ctx
-                    .get_input_as_source_or_const(inputs[0].insn, inputs[0].input)
+                    .get_input(inputs[0].insn, inputs[0].input)
                     .inst
                     .unwrap()
                     .0;
@@ -385,8 +386,19 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             let base = input_to_reg(ctx, inputs[1], NarrowValueMode::None);
 
             let mem = AMode::RegOffset(base, i64::from(off));
+            let memflags = ctx.memflags(insn).expect("memory flags");
 
-            ctx.emit(Inst::Store { rt, mem, bits });
+            let srcloc = if !memflags.notrap() {
+                Some(ctx.srcloc(insn))
+            } else {
+                None
+            };
+            ctx.emit(Inst::Store {
+                rt,
+                mem,
+                srcloc,
+                bits,
+            });
         }
         Opcode::Load
         | Opcode::Uload8
@@ -417,10 +429,17 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             assert_eq!(inputs.len(), 2, "only one input for store memory operands");
             let base = input_to_reg(ctx, inputs[1], NarrowValueMode::None);
             let mem = AMode::RegOffset(base, i64::from(off));
+            let memflags = ctx.memflags(insn).expect("memory flags");
 
+            let srcloc = if !memflags.notrap() {
+                Some(ctx.srcloc(insn))
+            } else {
+                None
+            };
             ctx.emit(Inst::Load {
                 rt: out_reg,
                 mem,
+                srcloc,
                 bits,
                 sign_extend,
             });
@@ -465,19 +484,19 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             ctx.emit(Inst::Bkpt);
         }
         Opcode::Trap => {
-            let trap_info = inst_trapcode(ctx.data(insn)).unwrap();
+            let trap_info = (ctx.srcloc(insn), inst_trapcode(ctx.data(insn)).unwrap());
             ctx.emit(Inst::Udf { trap_info })
         }
         Opcode::Trapif => {
             let cmp_insn = ctx
-                .get_input_as_source_or_const(inputs[0].insn, inputs[0].input)
+                .get_input(inputs[0].insn, inputs[0].input)
                 .inst
                 .unwrap()
                 .0;
             debug_assert_eq!(ctx.data(cmp_insn).opcode(), Opcode::Ifcmp);
             emit_cmp(ctx, cmp_insn);
 
-            let trap_info = inst_trapcode(ctx.data(insn)).unwrap();
+            let trap_info = (ctx.srcloc(insn), inst_trapcode(ctx.data(insn)).unwrap());
             let condcode = inst_condcode(ctx.data(insn)).unwrap();
             let cond = lower_condcode(condcode);
 
@@ -486,14 +505,14 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
         Opcode::FallthroughReturn | Opcode::Return => {
             for (i, input) in inputs.iter().enumerate() {
                 let reg = input_to_reg(ctx, *input, NarrowValueMode::None);
-                let retval_reg = ctx.retval(i).only_reg().unwrap();
+                let retval_reg = ctx.retval(i);
                 let ty = ctx.input_ty(insn, i);
 
                 ctx.emit(Inst::gen_move(retval_reg, reg, ty));
             }
         }
         Opcode::Call | Opcode::CallIndirect => {
-            let caller_conv = ctx.abi().call_conv();
+            let loc = ctx.srcloc(insn);
             let (mut abi, inputs) = match op {
                 Opcode::Call => {
                     let (extname, dist) = ctx.call_target(insn).unwrap();
@@ -502,7 +521,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     assert_eq!(inputs.len(), sig.params.len());
                     assert_eq!(outputs.len(), sig.returns.len());
                     (
-                        Arm32ABICaller::from_func(sig, &extname, dist, caller_conv, flags)?,
+                        Arm32ABICaller::from_func(sig, &extname, dist, loc)?,
                         &inputs[..],
                     )
                 }
@@ -511,22 +530,19 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     let sig = ctx.call_sig(insn).unwrap();
                     assert_eq!(inputs.len() - 1, sig.params.len());
                     assert_eq!(outputs.len(), sig.returns.len());
-                    (
-                        Arm32ABICaller::from_ptr(sig, ptr, op, caller_conv, flags)?,
-                        &inputs[1..],
-                    )
+                    (Arm32ABICaller::from_ptr(sig, ptr, loc, op)?, &inputs[1..])
                 }
                 _ => unreachable!(),
             };
             assert_eq!(inputs.len(), abi.num_args());
             for (i, input) in inputs.iter().enumerate().filter(|(i, _)| *i <= 3) {
                 let arg_reg = input_to_reg(ctx, *input, NarrowValueMode::None);
-                abi.emit_copy_regs_to_arg(ctx, i, ValueRegs::one(arg_reg));
+                abi.emit_copy_reg_to_arg(ctx, i, arg_reg);
             }
             abi.emit_call(ctx);
             for (i, output) in outputs.iter().enumerate() {
                 let retval_reg = output_to_reg(ctx, *output);
-                abi.emit_copy_retval_to_regs(ctx, i, ValueRegs::one(retval_reg));
+                abi.emit_copy_retval_to_reg(ctx, i, retval_reg);
             }
         }
         _ => panic!("lowering {} unimplemented!", op),
@@ -539,6 +555,7 @@ pub(crate) fn lower_branch<C: LowerCtx<I = Inst>>(
     ctx: &mut C,
     branches: &[IRInst],
     targets: &[MachLabel],
+    fallthrough: Option<MachLabel>,
 ) -> CodegenResult<()> {
     // A block should end with at most two branches. The first may be a
     // conditional branch; a conditional branch can be followed only by an
@@ -555,8 +572,11 @@ pub(crate) fn lower_branch<C: LowerCtx<I = Inst>>(
 
         assert!(op1 == Opcode::Jump || op1 == Opcode::Fallthrough);
         let taken = BranchTarget::Label(targets[0]);
-        let not_taken = BranchTarget::Label(targets[1]);
-
+        let not_taken = match op1 {
+            Opcode::Jump => BranchTarget::Label(targets[1]),
+            Opcode::Fallthrough => BranchTarget::Label(fallthrough.unwrap()),
+            _ => unreachable!(), // assert above.
+        };
         match op0 {
             Opcode::Brz | Opcode::Brnz => {
                 let rn = input_to_reg(

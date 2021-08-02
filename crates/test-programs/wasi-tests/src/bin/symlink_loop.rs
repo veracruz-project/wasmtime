@@ -1,22 +1,21 @@
 use std::{env, process};
-use wasi_tests::{assert_errno, open_scratch_directory, TESTCONFIG};
+use wasi_tests::open_scratch_directory;
 
 unsafe fn test_symlink_loop(dir_fd: wasi::Fd) {
-    if TESTCONFIG.support_dangling_filesystem() {
-        // Create a self-referencing symlink.
-        wasi::path_symlink("symlink", dir_fd, "symlink").expect("creating a symlink");
+    // Create a self-referencing symlink.
+    wasi::path_symlink("symlink", dir_fd, "symlink").expect("creating a symlink");
 
-        // Try to open it.
-        assert_errno!(
-            wasi::path_open(dir_fd, 0, "symlink", 0, 0, 0, 0)
-                .expect_err("opening a self-referencing symlink")
-                .raw_error(),
-            wasi::ERRNO_LOOP
-        );
+    // Try to open it.
+    assert_eq!(
+        wasi::path_open(dir_fd, 0, "symlink", 0, 0, 0, 0)
+            .expect_err("opening a self-referencing symlink")
+            .raw_error(),
+        wasi::ERRNO_LOOP,
+        "errno should be ERRNO_LOOP",
+    );
 
-        // Clean up.
-        wasi::path_unlink_file(dir_fd, "symlink").expect("removing a file");
-    }
+    // Clean up.
+    wasi::path_unlink_file(dir_fd, "symlink").expect("removing a file");
 }
 
 fn main() {

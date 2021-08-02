@@ -142,10 +142,11 @@ where
     sort_lexicographically(&mut opts);
 
     let automata = automatize(&opts);
+    let paths = opts.paths;
     let integers = opts.integers;
 
     if let Ok(path) = std::env::var("PEEPMATIC_DOT") {
-        let f = dot_fmt::PeepholeDotFmt(&integers);
+        let f = dot_fmt::PeepholeDotFmt(&paths, &integers);
         if let Err(e) = automata.write_dot_file(&f, &path) {
             panic!(
                 "failed to write GraphViz Dot file to PEEPMATIC_DOT={}; error: {}",
@@ -154,7 +155,11 @@ where
         }
     }
 
-    Ok(PeepholeOptimizations { integers, automata })
+    Ok(PeepholeOptimizations {
+        paths,
+        integers,
+        automata,
+    })
 }
 
 #[cfg(test)]

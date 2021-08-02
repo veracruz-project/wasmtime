@@ -1,5 +1,4 @@
 test compile
-set unwind_info=false
 target aarch64
 
 function %f(i64) -> i64 {

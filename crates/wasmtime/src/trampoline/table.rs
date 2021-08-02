@@ -1,11 +1,12 @@
-use crate::trampoline::{create_handle, StoreInstanceHandle};
+use super::create_handle::create_handle;
+use crate::trampoline::StoreInstanceHandle;
 use crate::Store;
 use crate::{TableType, ValType};
 use anyhow::{bail, Result};
 use wasmtime_environ::entity::PrimaryMap;
-use wasmtime_environ::{wasm, Module};
+use wasmtime_environ::{wasm, EntityIndex, Module};
 
-pub fn create_table(store: &Store, table: &TableType) -> Result<StoreInstanceHandle> {
+pub fn create_handle_with_table(store: &Store, table: &TableType) -> Result<StoreInstanceHandle> {
     let mut module = Module::new();
 
     let table = wasm::Table {
@@ -22,10 +23,16 @@ pub fn create_table(store: &Store, table: &TableType) -> Result<StoreInstanceHan
 
     let table_plan = wasmtime_environ::TablePlan::for_table(table, &tunable);
     let table_id = module.table_plans.push(table_plan);
-    // TODO: can this `exports.insert` get removed?
     module
         .exports
-        .insert(String::new(), wasm::EntityIndex::Table(table_id));
+        .insert("table".to_string(), EntityIndex::Table(table_id));
 
-    create_handle(module, store, PrimaryMap::new(), Box::new(()), &[], None)
+    create_handle(
+        module,
+        store,
+        PrimaryMap::new(),
+        Default::default(),
+        Box::new(()),
+        &[],
+    )
 }

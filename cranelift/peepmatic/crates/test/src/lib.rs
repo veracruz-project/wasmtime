@@ -6,6 +6,7 @@ use peepmatic_runtime::{
     cc::ConditionCode,
     instruction_set::InstructionSet,
     part::{Constant, Part},
+    paths::Path,
     r#type::{BitWidth, Kind, Type},
 };
 use peepmatic_test_operator::TestOperator;
@@ -328,23 +329,43 @@ unsafe impl<'a> InstructionSet<'a> for TestIsa {
         new
     }
 
-    fn operator<E>(
+    fn get_part_at_path(
         &self,
         program: &mut Program,
-        instr: Self::Instruction,
-        operands: &mut E,
-    ) -> Option<Self::Operator>
-    where
-        E: Extend<Part<Instruction>>,
-    {
+        root: Instruction,
+        path: Path,
+    ) -> Option<Part<Instruction>> {
+        log::debug!("get_part_at_path({:?})", path);
+
+        assert!(!path.0.is_empty());
+        assert_eq!(path.0[0], 0);
+
+        let mut part = Part::Instruction(root);
+        for p in &path.0[1..] {
+            if let Part::Instruction(inst) = part {
+                let data = program.data(inst);
+                let p = *p as usize;
+
+                if p < data.immediates.len() {
+                    part = data.immediates[p].into();
+                    continue;
+                }
+
+                if let Some(inst) = data.arguments.get(p - data.immediates.len()).copied() {
+                    part = Part::Instruction(inst);
+                    continue;
+                }
+            }
+
+            return None;
+        }
+
+        Some(part)
+    }
+
+    fn operator(&self, program: &mut Program, instr: Instruction) -> Option<TestOperator> {
         log::debug!("operator({:?})", instr);
         let data = program.data(instr);
-        operands.extend(
-            data.immediates
-                .iter()
-                .map(|imm| Part::from(*imm))
-                .chain(data.arguments.iter().map(|inst| Part::Instruction(*inst))),
-        );
         Some(data.operator)
     }
 

@@ -6,8 +6,9 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::map_unwrap_or,
-        clippy::clippy::unicode_not_nfc,
+        clippy::option_map_unwrap_or,
+        clippy::option_map_unwrap_or_else,
+        clippy::unicode_not_nfc,
         clippy::use_self
     )
 )]

@@ -1,14 +1,13 @@
 [package]
 name = "peepmatic-automata"
-version = "0.74.0"
+version = "0.67.0"
 authors = ["Nick Fitzgerald <fitzgen@gmail.com>"]
 edition = "2018"
 license = "Apache-2.0 WITH LLVM-exception"
 description = "Finite-state transducer automata"
 
-# FIXME(rust-lang/cargo#9300): uncomment once that lands
-# [package.metadata.docs.rs]
-# all-features = true
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 serde = { version = "1.0.106", optional = true }

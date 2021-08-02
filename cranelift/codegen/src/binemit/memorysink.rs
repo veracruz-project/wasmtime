@@ -74,6 +74,9 @@ impl<'a> MemoryCodeSink<'a> {
 
 /// A trait for receiving relocations for code that is emitted directly into memory.
 pub trait RelocSink {
+    /// Add a relocation referencing a block at the current offset.
+    fn reloc_block(&mut self, _: CodeOffset, _: Reloc, _: CodeOffset);
+
     /// Add a relocation referencing an external symbol at the current offset.
     fn reloc_external(
         &mut self,
@@ -133,6 +136,11 @@ impl<'a> CodeSink for MemoryCodeSink<'a> {
 
     fn put8(&mut self, x: u64) {
         self.write(x);
+    }
+
+    fn reloc_block(&mut self, rel: Reloc, block_offset: CodeOffset) {
+        let ofs = self.offset();
+        self.relocs.reloc_block(ofs, rel, block_offset);
     }
 
     fn reloc_external(
@@ -196,6 +204,7 @@ impl<'a> CodeSink for MemoryCodeSink<'a> {
 pub struct NullRelocSink {}
 
 impl RelocSink for NullRelocSink {
+    fn reloc_block(&mut self, _: CodeOffset, _: Reloc, _: CodeOffset) {}
     fn reloc_external(
         &mut self,
         _: CodeOffset,

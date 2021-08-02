@@ -54,9 +54,17 @@ pub extern "C" fn wasm_functype_new(
     params: &mut wasm_valtype_vec_t,
     results: &mut wasm_valtype_vec_t,
 ) -> Box<wasm_functype_t> {
-    let params = params.take().into_iter().map(|vt| vt.unwrap().ty.clone());
-    let results = results.take().into_iter().map(|vt| vt.unwrap().ty.clone());
-    let functype = FuncType::new(params, results);
+    let params = params
+        .take()
+        .into_iter()
+        .map(|vt| vt.unwrap().ty.clone())
+        .collect::<Vec<_>>();
+    let results = results
+        .take()
+        .into_iter()
+        .map(|vt| vt.unwrap().ty.clone())
+        .collect::<Vec<_>>();
+    let functype = FuncType::new(params.into_boxed_slice(), results.into_boxed_slice());
     Box::new(wasm_functype_t::new(functype))
 }
 
@@ -66,6 +74,7 @@ pub extern "C" fn wasm_functype_params(ft: &wasm_functype_t) -> &wasm_valtype_ve
     ft.params_cache.get_or_init(|| {
         ft.ty
             .params()
+            .iter()
             .map(|p| Some(Box::new(wasm_valtype_t { ty: p.clone() })))
             .collect::<Vec<_>>()
             .into()
@@ -78,6 +87,7 @@ pub extern "C" fn wasm_functype_results(ft: &wasm_functype_t) -> &wasm_valtype_v
     ft.returns_cache.get_or_init(|| {
         ft.ty
             .results()
+            .iter()
             .map(|p| Some(Box::new(wasm_valtype_t { ty: p.clone() })))
             .collect::<Vec<_>>()
             .into()

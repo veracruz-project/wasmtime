@@ -19,6 +19,22 @@ impl PrintRelocs {
 }
 
 impl binemit::RelocSink for PrintRelocs {
+    fn reloc_block(
+        &mut self,
+        where_: binemit::CodeOffset,
+        r: binemit::Reloc,
+        offset: binemit::CodeOffset,
+    ) {
+        if self.flag_print {
+            writeln!(
+                &mut self.text,
+                "reloc_block: {} {} at {}",
+                r, offset, where_
+            )
+            .unwrap();
+        }
+    }
+
     fn reloc_external(
         &mut self,
         where_: binemit::CodeOffset,
@@ -117,47 +133,37 @@ cfg_if! {
                 Architecture::X86_32(_) => Capstone::new()
                     .x86()
                     .mode(arch::x86::ArchMode::Mode32)
-                    .build()
-                    .map_err(map_caperr)?,
+                    .build()?,
                 Architecture::X86_64 => Capstone::new()
                     .x86()
                     .mode(arch::x86::ArchMode::Mode64)
-                    .build()
-                    .map_err(map_caperr)?,
+                    .build()?,
                 Architecture::Arm(arm) => {
                     if arm.is_thumb() {
                         Capstone::new()
                             .arm()
                             .mode(arch::arm::ArchMode::Thumb)
-                            .build()
-                            .map_err(map_caperr)?
+                            .build()?
                     } else {
                         Capstone::new()
                             .arm()
                             .mode(arch::arm::ArchMode::Arm)
-                            .build()
-                            .map_err(map_caperr)?
+                            .build()?
                     }
                 }
                 Architecture::Aarch64 {..} => {
                     let mut cs = Capstone::new()
                         .arm64()
                         .mode(arch::arm64::ArchMode::Arm)
-                        .build()
-                        .map_err(map_caperr)?;
+                        .build()?;
                     // AArch64 uses inline constants rather than a separate constant pool right now.
                     // Without this option, Capstone will stop disassembling as soon as it sees
                     // an inline constant that is not also a valid instruction. With this option,
                     // Capstone will print a `.byte` directive with the bytes of the inline constant
                     // and continue to the next instruction.
-                    cs.set_skipdata(true).map_err(map_caperr)?;
+                    cs.set_skipdata(true)?;
                     cs
                 }
-                Architecture::S390x {..} => Capstone::new()
-                    .sysz()
-                    .mode(arch::sysz::ArchMode::Default)
-                    .build()
-                    .map_err(map_caperr)?,
                 _ => anyhow::bail!("Unknown ISA"),
             };
 
@@ -201,10 +207,6 @@ cfg_if! {
                 println!("{}", line);
             }
             Ok(())
-        }
-
-        fn map_caperr(err: capstone::Error) -> anyhow::Error{
-            anyhow::format_err!("{}", err)
         }
     } else {
         pub fn print_disassembly(_: &dyn TargetIsa, _: &[u8]) -> Result<()> {

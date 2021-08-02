@@ -100,9 +100,7 @@ int main() {
   assert(linking1_externs.size == 1);
   wasm_func_t *run = wasm_extern_as_func(linking1_externs.data[0]);
   assert(run != NULL);
-  wasm_val_vec_t args_vec = WASM_EMPTY_VEC;
-  wasm_val_vec_t results_vec = WASM_EMPTY_VEC;
-  error = wasmtime_func_call(run, &args_vec, &results_vec, &trap);
+  error = wasmtime_func_call(run, NULL, 0, NULL, 0, &trap);
   if (error != NULL || trap != NULL)
     exit_with_error("failed to call run", error, trap);
 
