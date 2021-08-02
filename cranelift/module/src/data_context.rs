@@ -1,12 +1,14 @@
 //! Defines `DataContext`.
 
-use cranelift_codegen::binemit::{Addend, CodeOffset};
+use cranelift_codegen::binemit::{Addend, CodeOffset, Reloc};
 use cranelift_codegen::entity::PrimaryMap;
 use cranelift_codegen::ir;
 use std::borrow::ToOwned;
 use std::boxed::Box;
 use std::string::String;
 use std::vec::Vec;
+
+use crate::RelocRecord;
 
 /// This specifies how data is to be initialized.
 #[derive(PartialEq, Eq, Debug)]
@@ -50,6 +52,37 @@ pub struct DataDescription {
     pub data_relocs: Vec<(CodeOffset, ir::GlobalValue, Addend)>,
     /// Object file section
     pub custom_segment_section: Option<(String, String)>,
+    /// Alignment in bytes. `None` means that the default alignment of the respective module should
+    /// be used.
+    pub align: Option<u64>,
+}
+
+impl DataDescription {
+    /// An iterator over all relocations of the data object.
+    pub fn all_relocs<'a>(
+        &'a self,
+        pointer_reloc: Reloc,
+    ) -> impl Iterator<Item = RelocRecord> + 'a {
+        let func_relocs = self
+            .function_relocs
+            .iter()
+            .map(move |&(offset, id)| RelocRecord {
+                reloc: pointer_reloc,
+                offset,
+                name: self.function_decls[id].clone(),
+                addend: 0,
+            });
+        let data_relocs = self
+            .data_relocs
+            .iter()
+            .map(move |&(offset, id, addend)| RelocRecord {
+                reloc: pointer_reloc,
+                offset,
+                name: self.data_decls[id].clone(),
+                addend,
+            });
+        func_relocs.chain(data_relocs)
+    }
 }
 
 /// This is to data objects what cranelift_codegen::Context is to functions.
@@ -68,6 +101,7 @@ impl DataContext {
                 function_relocs: vec![],
                 data_relocs: vec![],
                 custom_segment_section: None,
+                align: None,
             },
         }
     }
@@ -79,6 +113,8 @@ impl DataContext {
         self.description.data_decls.clear();
         self.description.function_relocs.clear();
         self.description.data_relocs.clear();
+        self.description.custom_segment_section = None;
+        self.description.align = None;
     }
 
     /// Define a zero-initialized object with the given size.
@@ -98,6 +134,12 @@ impl DataContext {
     /// Override the segment/section for data, only supported on Object backend
     pub fn set_segment_section(&mut self, seg: &str, sec: &str) {
         self.description.custom_segment_section = Some((seg.to_owned(), sec.to_owned()))
+    }
+
+    /// Set the alignment for data. The alignment must be a power of two.
+    pub fn set_align(&mut self, align: u64) {
+        assert!(align.is_power_of_two());
+        self.description.align = Some(align);
     }
 
     /// Declare an external function import.

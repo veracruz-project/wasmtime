@@ -68,7 +68,7 @@ pub extern "C" fn wasmtime_linker_define_instance(
         Ok(s) => s,
         Err(_) => return bad_utf8(),
     };
-    handle_result(linker.instance(name, &instance.instance), |_linker| ())
+    handle_result(linker.instance(name, instance.instance()), |_linker| ())
 }
 
 #[no_mangle]
@@ -78,7 +78,7 @@ pub extern "C" fn wasmtime_linker_instantiate(
     instance_ptr: &mut *mut wasm_instance_t,
     trap_ptr: &mut *mut wasm_trap_t,
 ) -> Option<Box<wasmtime_error_t>> {
-    let result = linker.linker.instantiate(&module.module);
+    let result = linker.linker.instantiate(module.module());
     super::instance::handle_instantiate(result, instance_ptr, trap_ptr)
 }
 
@@ -93,7 +93,7 @@ pub extern "C" fn wasmtime_linker_module(
         Ok(s) => s,
         Err(_) => return bad_utf8(),
     };
-    handle_result(linker.module(name, &module.module), |_linker| ())
+    handle_result(linker.module(name, module.module()), |_linker| ())
 }
 
 #[no_mangle]
@@ -116,7 +116,7 @@ pub extern "C" fn wasmtime_linker_get_default(
 pub extern "C" fn wasmtime_linker_get_one_by_name(
     linker: &wasmtime_linker_t,
     module: &wasm_name_t,
-    name: &wasm_name_t,
+    name: Option<&wasm_name_t>,
     item_ptr: &mut *mut wasm_extern_t,
 ) -> Option<Box<wasmtime_error_t>> {
     let linker = &linker.linker;
@@ -124,9 +124,12 @@ pub extern "C" fn wasmtime_linker_get_one_by_name(
         Ok(s) => s,
         Err(_) => return bad_utf8(),
     };
-    let name = match str::from_utf8(name.as_slice()) {
-        Ok(s) => s,
-        Err(_) => return bad_utf8(),
+    let name = match name {
+        Some(name) => match str::from_utf8(name.as_slice()) {
+            Ok(s) => Some(s),
+            Err(_) => return bad_utf8(),
+        },
+        None => None,
     };
     handle_result(linker.get_one_by_name(module, name), |which| {
         *item_ptr = Box::into_raw(Box::new(wasm_extern_t { which }))
