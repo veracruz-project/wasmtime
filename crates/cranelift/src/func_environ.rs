@@ -4,17 +4,20 @@ use cranelift_codegen::ir::condcodes::*;
 use cranelift_codegen::ir::immediates::{Offset32, Uimm64};
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{AbiParam, ArgumentPurpose, Function, InstBuilder, Signature};
-use cranelift_codegen::isa::{self, TargetFrontendConfig};
+use cranelift_codegen::isa::{self, TargetFrontendConfig, TargetIsa};
 use cranelift_entity::EntityRef;
 use cranelift_frontend::FunctionBuilder;
+use cranelift_frontend::Variable;
 use cranelift_wasm::{
-    self, FuncIndex, GlobalIndex, GlobalVariable, MemoryIndex, SignatureIndex, TableIndex,
-    TargetEnvironment, WasmError, WasmResult, WasmType,
+    self, FuncIndex, FuncTranslationState, GlobalIndex, GlobalVariable, MemoryIndex, TableIndex,
+    TargetEnvironment, TypeIndex, WasmError, WasmResult, WasmType,
 };
 use std::convert::TryFrom;
+use std::mem;
+use wasmparser::Operator;
 use wasmtime_environ::{
-    BuiltinFunctionIndex, MemoryPlan, MemoryStyle, Module, TableStyle, Tunables, VMOffsets,
-    INTERRUPTED, WASM_PAGE_SIZE,
+    BuiltinFunctionIndex, MemoryPlan, MemoryStyle, Module, TableStyle, Tunables, TypeTables,
+    VMOffsets, INTERRUPTED, WASM_PAGE_SIZE,
 };
 
 /// Compute an `ir::ExternalName` for a given wasm function index.
@@ -69,7 +72,20 @@ macro_rules! declare_function_signatures {
             }
 
             fn i32(&self) -> AbiParam {
-                AbiParam::new(I32)
+                // Some platform ABIs require i32 values to be zero- or sign-
+                // extended to the full register width.  We need to indicate
+                // this here by using the appropriate .uext or .sext attribute.
+                // The attribute can be added unconditionally; platforms whose
+                // ABI does not require such extensions will simply ignore it.
+                // Note that currently all i32 arguments or return values used
+                // by builtin functions are unsigned, so we always use .uext.
+                // If that ever changes, we will have to add a second type
+                // marker here.
+                AbiParam::new(I32).uext()
+            }
+
+            fn i64(&self) -> AbiParam {
+                AbiParam::new(I64)
             }
 
             $(
@@ -93,11 +109,9 @@ wasmtime_environ::foreach_builtin_function!(declare_function_signatures);
 
 /// The `FuncEnvironment` implementation for use by the `ModuleEnvironment`.
 pub struct FuncEnvironment<'module_environment> {
-    /// Target-specified configuration.
-    target_config: TargetFrontendConfig,
-
-    /// The module-level environment which this function-level environment belongs to.
+    isa: &'module_environment (dyn TargetIsa + 'module_environment),
     module: &'module_environment Module,
+    types: &'module_environment TypeTables,
 
     /// The Cranelift global holding the vmctx address.
     vmctx: Option<ir::GlobalValue>,
@@ -109,35 +123,57 @@ pub struct FuncEnvironment<'module_environment> {
     pub(crate) offsets: VMOffsets,
 
     tunables: &'module_environment Tunables,
+
+    /// A function-local variable which stores the cached value of the amount of
+    /// fuel remaining to execute. If used this is modified frequently so it's
+    /// stored locally as a variable instead of always referenced from the field
+    /// in `*const VMInterrupts`
+    fuel_var: cranelift_frontend::Variable,
+
+    /// A function-local variable which caches the value of `*const
+    /// VMInterrupts` for this function's vmctx argument. This pointer is stored
+    /// in the vmctx itself, but never changes for the lifetime of the function,
+    /// so if we load it up front we can continue to use it throughout.
+    vminterrupts_ptr: cranelift_frontend::Variable,
+
+    fuel_consumed: i64,
 }
 
 impl<'module_environment> FuncEnvironment<'module_environment> {
     pub fn new(
-        target_config: TargetFrontendConfig,
+        isa: &'module_environment (dyn TargetIsa + 'module_environment),
         module: &'module_environment Module,
+        types: &'module_environment TypeTables,
         tunables: &'module_environment Tunables,
     ) -> Self {
         let builtin_function_signatures = BuiltinFunctionSignatures::new(
-            target_config.pointer_type(),
-            match target_config.pointer_type() {
+            isa.pointer_type(),
+            match isa.pointer_type() {
                 ir::types::I32 => ir::types::R32,
                 ir::types::I64 => ir::types::R64,
                 _ => panic!(),
             },
-            target_config.default_call_conv,
+            crate::wasmtime_call_conv(isa),
         );
         Self {
-            target_config,
+            isa,
             module,
+            types,
             vmctx: None,
             builtin_function_signatures,
-            offsets: VMOffsets::new(target_config.pointer_bytes(), module),
+            offsets: VMOffsets::new(isa.pointer_bytes(), module),
             tunables,
+            fuel_var: Variable::new(0),
+            vminterrupts_ptr: Variable::new(0),
+
+            // Start with at least one fuel being consumed because even empty
+            // functions should consume at least some fuel.
+            fuel_consumed: 1,
         }
     }
 
     fn pointer_type(&self) -> ir::Type {
-        self.target_config.pointer_type()
+        self.isa.pointer_type()
     }
 
     fn vmctx(&mut self, func: &mut Function) -> ir::GlobalValue {
@@ -224,26 +260,6 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         (sig, BuiltinFunctionIndex::elem_drop())
     }
 
-    fn get_memory_copy_func(
-        &mut self,
-        func: &mut Function,
-        memory_index: MemoryIndex,
-    ) -> (ir::SigRef, usize, BuiltinFunctionIndex) {
-        if let Some(defined_memory_index) = self.module.defined_memory_index(memory_index) {
-            (
-                self.builtin_function_signatures.defined_memory_copy(func),
-                defined_memory_index.index(),
-                BuiltinFunctionIndex::defined_memory_copy(),
-            )
-        } else {
-            (
-                self.builtin_function_signatures.imported_memory_copy(func),
-                memory_index.index(),
-                BuiltinFunctionIndex::imported_memory_copy(),
-            )
-        }
-    }
-
     fn get_memory_fill_func(
         &mut self,
         func: &mut Function,
@@ -261,6 +277,70 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
                 memory_index.index(),
                 BuiltinFunctionIndex::imported_memory_fill(),
             )
+        }
+    }
+
+    fn get_memory_atomic_notify(
+        &mut self,
+        func: &mut Function,
+        memory_index: MemoryIndex,
+    ) -> (ir::SigRef, usize, BuiltinFunctionIndex) {
+        if let Some(defined_memory_index) = self.module.defined_memory_index(memory_index) {
+            (
+                self.builtin_function_signatures.memory_atomic_notify(func),
+                defined_memory_index.index(),
+                BuiltinFunctionIndex::memory_atomic_notify(),
+            )
+        } else {
+            (
+                self.builtin_function_signatures
+                    .imported_memory_atomic_notify(func),
+                memory_index.index(),
+                BuiltinFunctionIndex::imported_memory_atomic_notify(),
+            )
+        }
+    }
+
+    fn get_memory_atomic_wait(
+        &mut self,
+        func: &mut Function,
+        memory_index: MemoryIndex,
+        ty: ir::Type,
+    ) -> (ir::SigRef, usize, BuiltinFunctionIndex) {
+        match ty {
+            I32 => {
+                if let Some(defined_memory_index) = self.module.defined_memory_index(memory_index) {
+                    (
+                        self.builtin_function_signatures.memory_atomic_wait32(func),
+                        defined_memory_index.index(),
+                        BuiltinFunctionIndex::memory_atomic_wait32(),
+                    )
+                } else {
+                    (
+                        self.builtin_function_signatures
+                            .imported_memory_atomic_wait32(func),
+                        memory_index.index(),
+                        BuiltinFunctionIndex::imported_memory_atomic_wait32(),
+                    )
+                }
+            }
+            I64 => {
+                if let Some(defined_memory_index) = self.module.defined_memory_index(memory_index) {
+                    (
+                        self.builtin_function_signatures.memory_atomic_wait64(func),
+                        defined_memory_index.index(),
+                        BuiltinFunctionIndex::memory_atomic_wait64(),
+                    )
+                } else {
+                    (
+                        self.builtin_function_signatures
+                            .imported_memory_atomic_wait64(func),
+                        memory_index.index(),
+                        BuiltinFunctionIndex::imported_memory_atomic_wait64(),
+                    )
+                }
+            }
+            x => panic!("get_memory_atomic_wait unsupported type: {:?}", x),
         }
     }
 
@@ -356,11 +436,246 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             (global, 0)
         }
     }
+
+    fn declare_vminterrupts_ptr(&mut self, builder: &mut FunctionBuilder<'_>) {
+        // We load the `*const VMInterrupts` value stored within vmctx at the
+        // head of the function and reuse the same value across the entire
+        // function. This is possible since we know that the pointer never
+        // changes for the lifetime of the function.
+        let pointer_type = self.pointer_type();
+        builder.declare_var(self.vminterrupts_ptr, pointer_type);
+        let vmctx = self.vmctx(builder.func);
+        let base = builder.ins().global_value(pointer_type, vmctx);
+        let offset = i32::try_from(self.offsets.vmctx_interrupts()).unwrap();
+        let interrupt_ptr = builder
+            .ins()
+            .load(pointer_type, ir::MemFlags::trusted(), base, offset);
+        builder.def_var(self.vminterrupts_ptr, interrupt_ptr);
+    }
+
+    fn fuel_function_entry(&mut self, builder: &mut FunctionBuilder<'_>) {
+        // On function entry we load the amount of fuel into a function-local
+        // `self.fuel_var` to make fuel modifications fast locally. This cache
+        // is then periodically flushed to the Store-defined location in
+        // `VMInterrupts` later.
+        builder.declare_var(self.fuel_var, ir::types::I64);
+        self.fuel_load_into_var(builder);
+        self.fuel_check(builder);
+    }
+
+    fn fuel_function_exit(&mut self, builder: &mut FunctionBuilder<'_>) {
+        // On exiting the function we need to be sure to save the fuel we have
+        // cached locally in `self.fuel_var` back into the Store-defined
+        // location.
+        self.fuel_save_from_var(builder);
+    }
+
+    fn fuel_before_op(
+        &mut self,
+        op: &Operator<'_>,
+        builder: &mut FunctionBuilder<'_>,
+        reachable: bool,
+    ) {
+        if !reachable {
+            // In unreachable code we shouldn't have any leftover fuel we
+            // haven't accounted for since the reason for us to become
+            // unreachable should have already added it to `self.fuel_var`.
+            debug_assert_eq!(self.fuel_consumed, 0);
+            return;
+        }
+
+        self.fuel_consumed += match op {
+            // Nop and drop generate no code, so don't consume fuel for them.
+            Operator::Nop | Operator::Drop => 0,
+
+            // Control flow may create branches, but is generally cheap and
+            // free, so don't consume fuel. Note the lack of `if` since some
+            // cost is incurred with the conditional check.
+            Operator::Block { .. }
+            | Operator::Loop { .. }
+            | Operator::Unreachable
+            | Operator::Return
+            | Operator::Else
+            | Operator::End => 0,
+
+            // everything else, just call it one operation.
+            _ => 1,
+        };
+
+        match op {
+            // Exiting a function (via a return or unreachable) or otherwise
+            // entering a different function (via a call) means that we need to
+            // update the fuel consumption in `VMInterrupts` because we're
+            // about to move control out of this function itself and the fuel
+            // may need to be read.
+            //
+            // Before this we need to update the fuel counter from our own cost
+            // leading up to this function call, and then we can store
+            // `self.fuel_var` into `VMInterrupts`.
+            Operator::Unreachable
+            | Operator::Return
+            | Operator::CallIndirect { .. }
+            | Operator::Call { .. }
+            | Operator::ReturnCall { .. }
+            | Operator::ReturnCallIndirect { .. } => {
+                self.fuel_increment_var(builder);
+                self.fuel_save_from_var(builder);
+            }
+
+            // To ensure all code preceding a loop is only counted once we
+            // update the fuel variable on entry.
+            Operator::Loop { .. }
+
+            // Entering into an `if` block means that the edge we take isn't
+            // known until runtime, so we need to update our fuel consumption
+            // before we take the branch.
+            | Operator::If { .. }
+
+            // Control-flow instructions mean that we're moving to the end/exit
+            // of a block somewhere else. That means we need to update the fuel
+            // counter since we're effectively terminating our basic block.
+            | Operator::Br { .. }
+            | Operator::BrIf { .. }
+            | Operator::BrTable { .. }
+
+            // Exiting a scope means that we need to update the fuel
+            // consumption because there are multiple ways to exit a scope and
+            // this is the only time we have to account for instructions
+            // executed so far.
+            | Operator::End
+
+            // This is similar to `end`, except that it's only the terminator
+            // for an `if` block. The same reasoning applies though in that we
+            // are terminating a basic block and need to update the fuel
+            // variable.
+            | Operator::Else => self.fuel_increment_var(builder),
+
+            // This is a normal instruction where the fuel is buffered to later
+            // get added to `self.fuel_var`.
+            //
+            // Note that we generally ignore instructions which may trap and
+            // therefore result in exiting a block early. Current usage of fuel
+            // means that it's not too important to account for a precise amount
+            // of fuel consumed but rather "close to the actual amount" is good
+            // enough. For 100% precise counting, however, we'd probably need to
+            // not only increment but also save the fuel amount more often
+            // around trapping instructions. (see the `unreachable` instruction
+            // case above)
+            //
+            // Note that `Block` is specifically omitted from incrementing the
+            // fuel variable. Control flow entering a `block` is unconditional
+            // which means it's effectively executing straight-line code. We'll
+            // update the counter when exiting a block, but we shouldn't need to
+            // do so upon entering a block.
+            _ => {}
+        }
+    }
+
+    fn fuel_after_op(&mut self, op: &Operator<'_>, builder: &mut FunctionBuilder<'_>) {
+        // After a function call we need to reload our fuel value since the
+        // function may have changed it.
+        match op {
+            Operator::Call { .. } | Operator::CallIndirect { .. } => {
+                self.fuel_load_into_var(builder);
+            }
+            _ => {}
+        }
+    }
+
+    /// Adds `self.fuel_consumed` to the `fuel_var`, zero-ing out the amount of
+    /// fuel consumed at that point.
+    fn fuel_increment_var(&mut self, builder: &mut FunctionBuilder<'_>) {
+        let consumption = mem::replace(&mut self.fuel_consumed, 0);
+        if consumption == 0 {
+            return;
+        }
+
+        let fuel = builder.use_var(self.fuel_var);
+        let fuel = builder.ins().iadd_imm(fuel, consumption);
+        builder.def_var(self.fuel_var, fuel);
+    }
+
+    /// Loads the fuel consumption value from `VMInterrupts` into `self.fuel_var`
+    fn fuel_load_into_var(&mut self, builder: &mut FunctionBuilder<'_>) {
+        let (addr, offset) = self.fuel_addr_offset(builder);
+        let fuel = builder
+            .ins()
+            .load(ir::types::I64, ir::MemFlags::trusted(), addr, offset);
+        builder.def_var(self.fuel_var, fuel);
+    }
+
+    /// Stores the fuel consumption value from `self.fuel_var` into
+    /// `VMInterrupts`.
+    fn fuel_save_from_var(&mut self, builder: &mut FunctionBuilder<'_>) {
+        let (addr, offset) = self.fuel_addr_offset(builder);
+        let fuel_consumed = builder.use_var(self.fuel_var);
+        builder
+            .ins()
+            .store(ir::MemFlags::trusted(), fuel_consumed, addr, offset);
+    }
+
+    /// Returns the `(address, offset)` of the fuel consumption within
+    /// `VMInterrupts`, used to perform loads/stores later.
+    fn fuel_addr_offset(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+    ) -> (ir::Value, ir::immediates::Offset32) {
+        (
+            builder.use_var(self.vminterrupts_ptr),
+            i32::from(self.offsets.vminterrupts_fuel_consumed()).into(),
+        )
+    }
+
+    /// Checks the amount of remaining, and if we've run out of fuel we call
+    /// the out-of-fuel function.
+    fn fuel_check(&mut self, builder: &mut FunctionBuilder) {
+        self.fuel_increment_var(builder);
+        let out_of_gas_block = builder.create_block();
+        let continuation_block = builder.create_block();
+
+        // Note that our fuel is encoded as adding positive values to a
+        // negative number. Whenever the negative number goes positive that
+        // means we ran out of fuel.
+        //
+        // Compare to see if our fuel is positive, and if so we ran out of gas.
+        // Otherwise we can continue on like usual.
+        let zero = builder.ins().iconst(ir::types::I64, 0);
+        let fuel = builder.use_var(self.fuel_var);
+        let cmp = builder.ins().ifcmp(fuel, zero);
+        builder
+            .ins()
+            .brif(IntCC::SignedGreaterThanOrEqual, cmp, out_of_gas_block, &[]);
+        builder.ins().jump(continuation_block, &[]);
+        builder.seal_block(out_of_gas_block);
+
+        // If we ran out of gas then we call our out-of-gas intrinsic and it
+        // figures out what to do. Note that this may raise a trap, or do
+        // something like yield to an async runtime. In either case we don't
+        // assume what happens and handle the case the intrinsic returns.
+        //
+        // Note that we save/reload fuel around this since the out-of-gas
+        // intrinsic may alter how much fuel is in the system.
+        builder.switch_to_block(out_of_gas_block);
+        self.fuel_save_from_var(builder);
+        let out_of_gas_sig = self.builtin_function_signatures.out_of_gas(builder.func);
+        let (vmctx, out_of_gas) = self.translate_load_builtin_function_address(
+            &mut builder.cursor(),
+            BuiltinFunctionIndex::out_of_gas(),
+        );
+        builder
+            .ins()
+            .call_indirect(out_of_gas_sig, out_of_gas, &[vmctx]);
+        self.fuel_load_into_var(builder);
+        builder.ins().jump(continuation_block, &[]);
+        builder.seal_block(continuation_block);
+
+        builder.switch_to_block(continuation_block);
+    }
 }
 
 impl<'module_environment> TargetEnvironment for FuncEnvironment<'module_environment> {
     fn target_config(&self) -> TargetFrontendConfig {
-        self.target_config
+        self.isa.frontend_config()
     }
 
     fn reference_type(&self, ty: WasmType) -> ir::Type {
@@ -373,6 +688,11 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
         // The first two parameters are the vmctx and caller vmctx. The rest are
         // the wasm parameters.
         index >= 2
+    }
+
+    fn after_locals(&mut self, num_locals: usize) {
+        self.vminterrupts_ptr = Variable::new(num_locals);
+        self.fuel_var = Variable::new(num_locals + 1);
     }
 
     fn make_table(&mut self, func: &mut ir::Function, index: TableIndex) -> WasmResult<ir::Table> {
@@ -514,6 +834,7 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
 
                 let reference_type = self.reference_type(WasmType::ExternRef);
 
+                builder.ensure_inserted_block();
                 let continue_block = builder.create_block();
                 let non_null_elem_block = builder.create_block();
                 let gc_block = builder.create_block();
@@ -663,6 +984,7 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
                 //    drop the old table element *after* we've replaced it with
                 //    the new `value`!
 
+                builder.ensure_inserted_block();
                 let current_block = builder.current_block().unwrap();
                 let inc_ref_count_block = builder.create_block();
                 builder.insert_block_after(inc_ref_count_block, current_block);
@@ -1009,9 +1331,11 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
     fn make_indirect_sig(
         &mut self,
         func: &mut ir::Function,
-        index: SignatureIndex,
+        index: TypeIndex,
     ) -> WasmResult<ir::SigRef> {
-        Ok(func.import_signature(self.module.signatures[index].1.clone()))
+        let index = self.module.types[index].unwrap_function();
+        let sig = crate::indirect_signature(self.isa, self.types, index);
+        Ok(func.import_signature(sig))
     }
 
     fn make_direct_func(
@@ -1019,8 +1343,8 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
         func: &mut ir::Function,
         index: FuncIndex,
     ) -> WasmResult<ir::FuncRef> {
-        let sig = self.module.native_func_signature(index);
-        let signature = func.import_signature(sig.clone());
+        let sig = crate::func_signature(self.isa, self.module, self.types, index);
+        let signature = func.import_signature(sig);
         let name = get_func_name(index);
         Ok(func.import_function(ir::ExtFuncData {
             name,
@@ -1036,7 +1360,7 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
         mut pos: FuncCursor<'_>,
         table_index: TableIndex,
         table: ir::Table,
-        sig_index: SignatureIndex,
+        ty_index: TypeIndex,
         sig_ref: ir::SigRef,
         callee: ir::Value,
         call_args: &[ir::Value],
@@ -1072,7 +1396,7 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
                 let vmctx = self.vmctx(pos.func);
                 let base = pos.ins().global_value(pointer_type, vmctx);
                 let offset =
-                    i32::try_from(self.offsets.vmctx_vmshared_signature_id(sig_index)).unwrap();
+                    i32::try_from(self.offsets.vmctx_vmshared_signature_id(ty_index)).unwrap();
 
                 // Load the caller ID.
                 let mut mem_flags = ir::MemFlags::trusted();
@@ -1199,23 +1523,25 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
     fn translate_memory_copy(
         &mut self,
         mut pos: FuncCursor,
-        memory_index: MemoryIndex,
-        _heap: ir::Heap,
+        src_index: MemoryIndex,
+        _src_heap: ir::Heap,
+        dst_index: MemoryIndex,
+        _dst_heap: ir::Heap,
         dst: ir::Value,
         src: ir::Value,
         len: ir::Value,
     ) -> WasmResult<()> {
-        let (func_sig, memory_index, func_idx) =
-            self.get_memory_copy_func(&mut pos.func, memory_index);
+        let src_index = pos.ins().iconst(I32, i64::from(src_index.as_u32()));
+        let dst_index = pos.ins().iconst(I32, i64::from(dst_index.as_u32()));
 
-        let memory_index_arg = pos.ins().iconst(I32, memory_index as i64);
+        let (vmctx, func_addr) = self
+            .translate_load_builtin_function_address(&mut pos, BuiltinFunctionIndex::memory_copy());
 
-        let (vmctx, func_addr) = self.translate_load_builtin_function_address(&mut pos, func_idx);
-
+        let func_sig = self.builtin_function_signatures.memory_copy(&mut pos.func);
         pos.ins().call_indirect(
             func_sig,
             func_addr,
-            &[vmctx, memory_index_arg, dst, src, len],
+            &[vmctx, dst_index, dst, src_index, src, len],
         );
 
         Ok(())
@@ -1368,61 +1694,136 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
 
     fn translate_atomic_wait(
         &mut self,
-        _pos: FuncCursor,
-        _index: MemoryIndex,
+        mut pos: FuncCursor,
+        memory_index: MemoryIndex,
         _heap: ir::Heap,
-        _addr: ir::Value,
-        _expected: ir::Value,
-        _timeout: ir::Value,
+        addr: ir::Value,
+        expected: ir::Value,
+        timeout: ir::Value,
     ) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported(
-            "wasm atomics (fn translate_atomic_wait)".to_string(),
-        ))
+        let implied_ty = pos.func.dfg.value_type(expected);
+        let (func_sig, memory_index, func_idx) =
+            self.get_memory_atomic_wait(&mut pos.func, memory_index, implied_ty);
+
+        let memory_index_arg = pos.ins().iconst(I32, memory_index as i64);
+
+        let (vmctx, func_addr) = self.translate_load_builtin_function_address(&mut pos, func_idx);
+
+        let call_inst = pos.ins().call_indirect(
+            func_sig,
+            func_addr,
+            &[vmctx, memory_index_arg, addr, expected, timeout],
+        );
+
+        Ok(*pos.func.dfg.inst_results(call_inst).first().unwrap())
     }
 
     fn translate_atomic_notify(
         &mut self,
-        _pos: FuncCursor,
-        _index: MemoryIndex,
+        mut pos: FuncCursor,
+        memory_index: MemoryIndex,
         _heap: ir::Heap,
-        _addr: ir::Value,
-        _count: ir::Value,
+        addr: ir::Value,
+        count: ir::Value,
     ) -> WasmResult<ir::Value> {
-        Err(WasmError::Unsupported(
-            "wasm atomics (fn translate_atomic_notify)".to_string(),
-        ))
+        let (func_sig, memory_index, func_idx) =
+            self.get_memory_atomic_notify(&mut pos.func, memory_index);
+
+        let memory_index_arg = pos.ins().iconst(I32, memory_index as i64);
+
+        let (vmctx, func_addr) = self.translate_load_builtin_function_address(&mut pos, func_idx);
+
+        let call_inst =
+            pos.ins()
+                .call_indirect(func_sig, func_addr, &[vmctx, memory_index_arg, addr, count]);
+
+        Ok(*pos.func.dfg.inst_results(call_inst).first().unwrap())
     }
 
-    fn translate_loop_header(&mut self, mut pos: FuncCursor) -> WasmResult<()> {
-        if !self.tunables.interruptable {
-            return Ok(());
-        }
-
-        // Start out each loop with a check to the interupt flag to allow
-        // interruption of long or infinite loops.
+    fn translate_loop_header(&mut self, builder: &mut FunctionBuilder) -> WasmResult<()> {
+        // If enabled check the interrupt flag to prevent long or infinite
+        // loops.
         //
         // For more information about this see comments in
         // `crates/environ/src/cranelift.rs`
-        let vmctx = self.vmctx(&mut pos.func);
-        let pointer_type = self.pointer_type();
-        let base = pos.ins().global_value(pointer_type, vmctx);
-        let offset = i32::try_from(self.offsets.vmctx_interrupts()).unwrap();
-        let interrupt_ptr = pos
-            .ins()
-            .load(pointer_type, ir::MemFlags::trusted(), base, offset);
-        let interrupt = pos.ins().load(
-            pointer_type,
-            ir::MemFlags::trusted(),
-            interrupt_ptr,
-            i32::from(self.offsets.vminterrupts_stack_limit()),
-        );
-        // Note that the cast to `isize` happens first to allow sign-extension,
-        // if necessary, to `i64`.
-        let interrupted_sentinel = pos.ins().iconst(pointer_type, INTERRUPTED as isize as i64);
-        let cmp = pos
-            .ins()
-            .icmp(IntCC::Equal, interrupt, interrupted_sentinel);
-        pos.ins().trapnz(cmp, ir::TrapCode::Interrupt);
+        if self.tunables.interruptable {
+            let pointer_type = self.pointer_type();
+            let interrupt_ptr = builder.use_var(self.vminterrupts_ptr);
+            let interrupt = builder.ins().load(
+                pointer_type,
+                ir::MemFlags::trusted(),
+                interrupt_ptr,
+                i32::from(self.offsets.vminterrupts_stack_limit()),
+            );
+            // Note that the cast to `isize` happens first to allow sign-extension,
+            // if necessary, to `i64`.
+            let interrupted_sentinel = builder
+                .ins()
+                .iconst(pointer_type, INTERRUPTED as isize as i64);
+            let cmp = builder
+                .ins()
+                .icmp(IntCC::Equal, interrupt, interrupted_sentinel);
+            builder.ins().trapnz(cmp, ir::TrapCode::Interrupt);
+        }
+
+        // Additionally if enabled check how much fuel we have remaining to see
+        // if we've run out by this point.
+        if self.tunables.consume_fuel {
+            self.fuel_check(builder);
+        }
+
+        Ok(())
+    }
+
+    fn before_translate_operator(
+        &mut self,
+        op: &Operator,
+        builder: &mut FunctionBuilder,
+        state: &FuncTranslationState,
+    ) -> WasmResult<()> {
+        if self.tunables.consume_fuel {
+            self.fuel_before_op(op, builder, state.reachable());
+        }
+        Ok(())
+    }
+
+    fn after_translate_operator(
+        &mut self,
+        op: &Operator,
+        builder: &mut FunctionBuilder,
+        state: &FuncTranslationState,
+    ) -> WasmResult<()> {
+        if self.tunables.consume_fuel && state.reachable() {
+            self.fuel_after_op(op, builder);
+        }
+        Ok(())
+    }
+
+    fn before_translate_function(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        _state: &FuncTranslationState,
+    ) -> WasmResult<()> {
+        // If the `vminterrupts_ptr` variable will get used then we initialize
+        // it here.
+        if self.tunables.consume_fuel || self.tunables.interruptable {
+            self.declare_vminterrupts_ptr(builder);
+        }
+        // Additionally we initialize `fuel_var` if it will get used.
+        if self.tunables.consume_fuel {
+            self.fuel_function_entry(builder);
+        }
+        Ok(())
+    }
+
+    fn after_translate_function(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        state: &FuncTranslationState,
+    ) -> WasmResult<()> {
+        if self.tunables.consume_fuel && state.reachable() {
+            self.fuel_function_exit(builder);
+        }
         Ok(())
     }
 }

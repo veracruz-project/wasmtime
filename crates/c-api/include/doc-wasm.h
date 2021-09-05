@@ -316,6 +316,12 @@
  *
  * \fn wasm_name_new_new_uninitialized
  * \brief Convenience alias
+ * 
+ * \fn wasm_name_new_from_string
+ * \brief Create a new name from a C string.
+ * 
+ * \fn wasm_name_new_from_string_nt
+ * \brief Create a new name from a C string with null terminator.
  *
  * \fn wasm_name_copy
  * \brief Convenience alias
@@ -407,7 +413,7 @@
  *
  * See #wasm_byte_vec_delete for more information.
  *
- * \fn own wasm_valtype_t* wasm_valtype_copy(wasm_valtype_t *)
+ * \fn own wasm_valtype_t* wasm_valtype_copy(const wasm_valtype_t *)
  * \brief Creates a new value which matches the provided one.
  *
  * The caller is responsible for deleting the returned value.
@@ -477,7 +483,7 @@
  *
  * See #wasm_byte_vec_delete for more information.
  *
- * \fn own wasm_functype_t* wasm_functype_copy(wasm_functype_t *)
+ * \fn own wasm_functype_t* wasm_functype_copy(const wasm_functype_t *)
  * \brief Creates a new value which matches the provided one.
  *
  * The caller is responsible for deleting the returned value.
@@ -548,7 +554,7 @@
  *
  * See #wasm_byte_vec_delete for more information.
  *
- * \fn own wasm_globaltype_t* wasm_globaltype_copy(wasm_globaltype_t *)
+ * \fn own wasm_globaltype_t* wasm_globaltype_copy(const wasm_globaltype_t *)
  * \brief Creates a new value which matches the provided one.
  *
  * The caller is responsible for deleting the returned value.
@@ -625,7 +631,7 @@
  *
  * See #wasm_byte_vec_delete for more information.
  *
- * \fn own wasm_tabletype_t* wasm_tabletype_copy(wasm_tabletype_t *)
+ * \fn own wasm_tabletype_t* wasm_tabletype_copy(const wasm_tabletype_t *)
  * \brief Creates a new value which matches the provided one.
  *
  * The caller is responsible for deleting the returned value.
@@ -711,7 +717,7 @@
  *
  * See #wasm_byte_vec_delete for more information.
  *
- * \fn own wasm_memorytype_t* wasm_memorytype_copy(wasm_memorytype_t *)
+ * \fn own wasm_memorytype_t* wasm_memorytype_copy(const wasm_memorytype_t *)
  * \brief Creates a new value which matches the provided one.
  *
  * The caller is responsible for deleting the returned value.
@@ -780,7 +786,7 @@
  *
  * See #wasm_byte_vec_delete for more information.
  *
- * \fn own wasm_externtype_t* wasm_externtype_copy(wasm_externtype_t *)
+ * \fn own wasm_externtype_t* wasm_externtype_copy(const wasm_externtype_t *)
  * \brief Creates a new value which matches the provided one.
  *
  * The caller is responsible for deleting the returned value.
@@ -793,8 +799,15 @@
  * \typedef wasm_externkind_t
  * \brief Classifier for #wasm_externtype_t, defined by #wasm_externkind_enum
  *
+ * This is returned from #wasm_extern_kind and #wasm_externtype_kind to
+ * determine what kind of type is wrapped.
+ *
  * \enum wasm_externkind_enum
  * \brief Kinds of external items for a wasm module.
+ *
+ * Note that this also includes #WASM_EXTERN_INSTANCE as well as
+ * #WASM_EXTERN_MODULE and is intended to be used when #wasm_externkind_t is
+ * used.
  */
 
 /**
@@ -950,7 +963,7 @@
  *
  * See #wasm_byte_vec_delete for more information.
  *
- * \fn own wasm_importtype_t* wasm_importtype_copy(wasm_importtype_t *)
+ * \fn own wasm_importtype_t* wasm_importtype_copy(const wasm_importtype_t *)
  * \brief Creates a new value which matches the provided one.
  *
  * The caller is responsible for deleting the returned value.
@@ -960,7 +973,8 @@
  *
  * This function takes ownership of the `module`, `name`, and
  * #wasm_externtype_t arguments. The caller is responsible for deleting the
- * returned value.
+ * returned value. Note that `name` can be `NULL` where in the module linking
+ * proposal the import name can be omitted.
  *
  * \fn const wasm_name_t* wasm_importtype_module(const wasm_importtype_t *);
  * \brief Returns the module this import is importing from.
@@ -972,7 +986,9 @@
  * \brief Returns the name this import is importing from.
  *
  * The returned memory is owned by the #wasm_importtype_t argument, the caller
- * should not deallocate it.
+ * should not deallocate it. Note that `NULL` can be returned which means
+ * that the import name is not provided. This is for imports with the module
+ * linking proposal that only have the module specified.
  *
  * \fn const wasm_externtype_t* wasm_importtype_type(const wasm_importtype_t *);
  * \brief Returns the type of item this import is importing.
@@ -1028,7 +1044,7 @@
  *
  * See #wasm_byte_vec_delete for more information.
  *
- * \fn own wasm_exporttype_t* wasm_exporttype_copy(wasm_exporttype_t *)
+ * \fn own wasm_exporttype_t* wasm_exporttype_copy(const wasm_exporttype_t *)
  * \brief Creates a new value which matches the provided one.
  *
  * The caller is responsible for deleting the returned value.
@@ -1510,8 +1526,6 @@
  * and types of results as the original type signature. It is undefined behavior
  * to return other types or different numbers of values.
  *
- * This function takes ownership of all of the parameters given. It's expected
- * that the caller will invoke `wasm_val_delete` for each one provided.
  * Ownership of the results and the trap returned, if any, is passed to the
  * caller of this function.
  *
@@ -1598,7 +1612,7 @@
  * \fn size_t wasm_func_result_arity(const wasm_func_t *);
  * \brief Returns the number of results returned by this function.
  *
- * \fn own wasm_trap_t *wasm_func_call(const wasm_func_t *, const wasm_val_t args[], const wasm_val_t results[]);
+* \fn own wasm_trap_t *wasm_func_call(const wasm_func_t *, const wasm_val_vec_t *args, wasm_val_vec_t *results);
  * \brief Calls the provided function with the arguments given.
  *
  * This function is used to call WebAssembly from the host. The parameter array
@@ -2154,7 +2168,7 @@
  * \fn wasm_ref_as_instance_const(const wasm_ref_t *);
  * \brief Unimplemented in Wasmtime, aborts the process if called.
  *
- * \fn own wasm_instance_t *wasm_instance_new(wasm_store_t *, const wasm_module_t *, const wasm_extern_t *const[], wasm_trap_t **);
+ * \fn own wasm_instance_t *wasm_instance_new(wasm_store_t *, const wasm_module_t *, const wasm_extern_vec_t *, wasm_trap_t **);
  * \brief Instantiates a module with the provided imports.
  *
  * This function will instantiate the provided #wasm_module_t into the provided
@@ -2183,4 +2197,30 @@
  * the caller, which are exported from the instance. The `out` list will have
  * the same length as #wasm_module_exports called on the original module. Each
  * element is 1:1 matched with the elements in the list of #wasm_module_exports.
+ */
+
+/**
+ * \def WASM_EMPTY_VEC
+ * \brief Used to initialize an empty vector type.
+ *
+ * \def WASM_ARRAY_VEC
+ * \brief Used to initialize a vector type from a C array.
+ *
+ * \def WASM_I32_VAL
+ * \brief Used to initialize a 32-bit integer wasm_val_t value.
+ *
+ * \def WASM_I64_VAL
+ * \brief Used to initialize a 64-bit integer wasm_val_t value.
+ *
+ * \def WASM_F32_VAL
+ * \brief Used to initialize a 32-bit floating point wasm_val_t value.
+ *
+ * \def WASM_F64_VAL
+ * \brief Used to initialize a 64-bit floating point wasm_val_t value.
+ *
+ * \def WASM_REF_VAL
+ * \brief Used to initialize an externref wasm_val_t value.
+ *
+ * \def WASM_INIT_VAL
+ * \brief Used to initialize a null externref wasm_val_t value.
  */

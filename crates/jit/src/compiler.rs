@@ -3,18 +3,23 @@
 use crate::instantiate::SetupError;
 use crate::object::{build_object, ObjectUnwindInfo};
 use object::write::Object;
+#[cfg(feature = "parallel-compilation")]
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
+use std::mem;
+use wasmparser::WasmFeatures;
 use wasmtime_debug::{emit_dwarf, DwarfSection};
 use wasmtime_environ::entity::EntityRef;
 use wasmtime_environ::isa::{TargetFrontendConfig, TargetIsa};
 use wasmtime_environ::wasm::{DefinedMemoryIndex, MemoryIndex};
 use wasmtime_environ::{
     CompiledFunctions, Compiler as EnvCompiler, DebugInfoData, Module, ModuleMemoryOffset,
-    ModuleTranslation, Tunables, VMOffsets,
+    ModuleTranslation, Tunables, TypeTables, VMOffsets,
 };
 
 /// Select which kind of compilation to use.
-#[derive(Copy, Clone, Debug, Hash)]
+#[derive(Copy, Clone, Debug, Hash, Serialize, Deserialize, Eq, PartialEq)]
 pub enum CompilationStrategy {
     /// Let Wasmtime pick the strategy.
     Auto,
@@ -40,11 +45,17 @@ pub struct Compiler {
     compiler: Box<dyn EnvCompiler>,
     strategy: CompilationStrategy,
     tunables: Tunables,
+    features: WasmFeatures,
 }
 
 impl Compiler {
     /// Construct a new `Compiler`.
-    pub fn new(isa: Box<dyn TargetIsa>, strategy: CompilationStrategy, tunables: Tunables) -> Self {
+    pub fn new(
+        isa: Box<dyn TargetIsa>,
+        strategy: CompilationStrategy,
+        tunables: Tunables,
+        features: WasmFeatures,
+    ) -> Self {
         Self {
             isa,
             strategy,
@@ -56,6 +67,7 @@ impl Compiler {
                 CompilationStrategy::Lightbeam => Box::new(wasmtime_lightbeam::Lightbeam),
             },
             tunables,
+            features,
         }
     }
 }
@@ -97,6 +109,11 @@ impl Compiler {
         self.isa.as_ref()
     }
 
+    /// Return the compiler's strategy.
+    pub fn strategy(&self) -> CompilationStrategy {
+        self.strategy
+    }
+
     /// Return the target's frontend configuration settings.
     pub fn frontend_config(&self) -> TargetFrontendConfig {
         self.isa.frontend_config()
@@ -107,36 +124,39 @@ impl Compiler {
         &self.tunables
     }
 
+    /// Return the enabled wasm features.
+    pub fn features(&self) -> &WasmFeatures {
+        &self.features
+    }
+
     /// Compile the given function bodies.
     pub fn compile<'data>(
         &self,
-        translation: &ModuleTranslation,
+        translation: &mut ModuleTranslation,
+        types: &TypeTables,
     ) -> Result<Compilation, SetupError> {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "parallel-compilation")] {
-                use rayon::prelude::*;
-                let iter = translation.function_body_inputs
-                    .iter()
-                    .collect::<Vec<_>>()
-                    .into_par_iter();
-            } else {
-                let iter = translation.function_body_inputs.iter();
-            }
-        }
-        let funcs = iter
+        let functions = mem::take(&mut translation.function_body_inputs);
+        let functions = functions.into_iter().collect::<Vec<_>>();
+        let funcs = maybe_parallel!(functions.(into_iter | into_par_iter))
             .map(|(index, func)| {
-                self.compiler
-                    .compile_function(translation, index, func, &*self.isa)
+                self.compiler.compile_function(
+                    translation,
+                    index,
+                    func,
+                    &*self.isa,
+                    &self.tunables,
+                    types,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .collect::<CompiledFunctions>();
 
-        let dwarf_sections = if translation.debuginfo.is_some() && !funcs.is_empty() {
+        let dwarf_sections = if self.tunables.generate_native_debuginfo && !funcs.is_empty() {
             transform_dwarf_data(
                 &*self.isa,
                 &translation.module,
-                translation.debuginfo.as_ref().unwrap(),
+                &translation.debuginfo,
                 &funcs,
             )?
         } else {
@@ -144,7 +164,7 @@ impl Compiler {
         };
 
         let (obj, unwind_info) =
-            build_object(&*self.isa, &translation.module, &funcs, dwarf_sections)?;
+            build_object(&*self.isa, &translation, types, &funcs, dwarf_sections)?;
 
         Ok(Compilation {
             obj,
@@ -161,19 +181,20 @@ impl Hash for Compiler {
             compiler: _,
             isa,
             tunables,
+            features,
         } = self;
 
         // Hash compiler's flags: compilation strategy, isa, frontend config,
         // misc tunables.
         strategy.hash(hasher);
         isa.triple().hash(hasher);
-        // TODO: if this `to_string()` is too expensive then we should upstream
-        // a native hashing ability of flags into cranelift itself, but
-        // compilation and/or cache loading is relatively expensive so seems
-        // unlikely.
-        isa.flags().to_string().hash(hasher);
+        isa.hash_all_flags(hasher);
         isa.frontend_config().hash(hasher);
         tunables.hash(hasher);
+        features.hash(hasher);
+
+        // Catch accidental bugs of reusing across crate versions.
+        env!("CARGO_PKG_VERSION").hash(hasher);
 
         // TODO: ... and should we hash anything else? There's a lot of stuff in
         // `TargetIsa`, like registers/encodings/etc. Should we be hashing that

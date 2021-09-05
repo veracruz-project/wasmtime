@@ -1,12 +1,13 @@
 use crate::vmcontext::{
     VMCallerCheckedAnyfunc, VMContext, VMGlobalDefinition, VMMemoryDefinition, VMTableDefinition,
 };
+use crate::RuntimeInstance;
+use std::any::Any;
 use std::ptr::NonNull;
 use wasmtime_environ::wasm::Global;
 use wasmtime_environ::{MemoryPlan, TablePlan};
 
 /// The value of an export passed from one instance to another.
-#[derive(Debug, Clone)]
 pub enum Export {
     /// A function export value.
     Function(ExportFunction),
@@ -19,6 +20,12 @@ pub enum Export {
 
     /// A global export value.
     Global(ExportGlobal),
+
+    /// An instance
+    Instance(RuntimeInstance),
+
+    /// A module
+    Module(Box<dyn Any>),
 }
 
 /// A function export value.

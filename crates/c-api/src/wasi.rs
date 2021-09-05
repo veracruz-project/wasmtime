@@ -1,19 +1,23 @@
 //! The WASI embedding API definitions for Wasmtime.
 use crate::{wasm_extern_t, wasm_importtype_t, wasm_store_t, wasm_trap_t};
 use anyhow::Result;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fs::File;
 use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::slice;
 use std::str;
-use wasi_common::{
-    old::snapshot_0::WasiCtxBuilder as WasiSnapshot0CtxBuilder, preopen_dir,
-    WasiCtxBuilder as WasiPreview1CtxBuilder,
+use wasmtime::{Extern, Linker, Trap};
+use wasmtime_wasi::{
+    sync::{
+        snapshots::preview_0::Wasi as WasiSnapshot0, snapshots::preview_1::Wasi as WasiPreview1,
+        Dir, WasiCtxBuilder,
+    },
+    WasiCtx,
 };
-use wasmtime::{Extern, Linker, Store, Trap};
-use wasmtime_wasi::{old::snapshot_0::Wasi as WasiSnapshot0, Wasi as WasiPreview1};
 
 unsafe fn cstr_to_path<'a>(path: *const c_char) -> Option<&'a Path> {
     CStr::from_ptr(path).to_str().map(Path::new).ok()
@@ -42,7 +46,7 @@ pub struct wasi_config_t {
     stdin: Option<File>,
     stdout: Option<File>,
     stderr: Option<File>,
-    preopens: Vec<(File, PathBuf)>,
+    preopens: Vec<(Dir, PathBuf)>,
     inherit_args: bool,
     inherit_env: bool,
     inherit_stdin: bool,
@@ -183,7 +187,7 @@ pub unsafe extern "C" fn wasi_config_preopen_dir(
     };
 
     let dir = match cstr_to_path(path) {
-        Some(p) => match preopen_dir(p) {
+        Some(p) => match Dir::open_ambient_dir(p) {
             Ok(d) => d,
             Err(_) => return false,
         },
@@ -200,78 +204,57 @@ enum WasiInstance {
     Snapshot0(WasiSnapshot0),
 }
 
-fn create_snapshot0_instance(store: &Store, config: wasi_config_t) -> Result<WasiInstance> {
-    let mut builder = WasiSnapshot0CtxBuilder::new();
+fn create_wasi_ctx(config: wasi_config_t) -> Result<Rc<RefCell<WasiCtx>>> {
+    let mut builder = WasiCtxBuilder::new();
     if config.inherit_args {
-        builder.inherit_args();
+        builder = builder.inherit_args()?;
     } else if !config.args.is_empty() {
-        builder.args(config.args);
+        let args = config
+            .args
+            .into_iter()
+            .map(|bytes| Ok(String::from_utf8(bytes)?))
+            .collect::<Result<Vec<String>>>()?;
+        builder = builder.args(&args)?;
     }
     if config.inherit_env {
-        builder.inherit_env();
+        builder = builder.inherit_env()?;
     } else if !config.env.is_empty() {
-        builder.envs(config.env);
+        let env = config
+            .env
+            .into_iter()
+            .map(|(kbytes, vbytes)| {
+                let k = String::from_utf8(kbytes)?;
+                let v = String::from_utf8(vbytes)?;
+                Ok((k, v))
+            })
+            .collect::<Result<Vec<(String, String)>>>()?;
+        builder = builder.envs(&env)?;
     }
     if config.inherit_stdin {
-        builder.inherit_stdin();
+        builder = builder.inherit_stdin();
     } else if let Some(file) = config.stdin {
-        builder.stdin(file);
+        let file = unsafe { cap_std::fs::File::from_std(file) };
+        let file = wasi_cap_std_sync::file::File::from_cap_std(file);
+        builder = builder.stdin(Box::new(file));
     }
     if config.inherit_stdout {
-        builder.inherit_stdout();
+        builder = builder.inherit_stdout();
     } else if let Some(file) = config.stdout {
-        builder.stdout(file);
+        let file = unsafe { cap_std::fs::File::from_std(file) };
+        let file = wasi_cap_std_sync::file::File::from_cap_std(file);
+        builder = builder.stdout(Box::new(file));
     }
     if config.inherit_stderr {
-        builder.inherit_stderr();
+        builder = builder.inherit_stderr();
     } else if let Some(file) = config.stderr {
-        builder.stderr(file);
+        let file = unsafe { cap_std::fs::File::from_std(file) };
+        let file = wasi_cap_std_sync::file::File::from_cap_std(file);
+        builder = builder.stderr(Box::new(file));
     }
-    for preopen in config.preopens {
-        builder.preopened_dir(preopen.0, preopen.1);
+    for (dir, path) in config.preopens {
+        builder = builder.preopened_dir(dir, path)?;
     }
-    Ok(WasiInstance::Snapshot0(WasiSnapshot0::new(
-        store,
-        builder.build()?,
-    )))
-}
-
-fn create_preview1_instance(store: &Store, config: wasi_config_t) -> Result<WasiInstance> {
-    use std::convert::TryFrom;
-    use wasi_common::OsFile;
-    let mut builder = WasiPreview1CtxBuilder::new();
-    if config.inherit_args {
-        builder.inherit_args();
-    } else if !config.args.is_empty() {
-        builder.args(config.args);
-    }
-    if config.inherit_env {
-        builder.inherit_env();
-    } else if !config.env.is_empty() {
-        builder.envs(config.env);
-    }
-    if config.inherit_stdin {
-        builder.inherit_stdin();
-    } else if let Some(file) = config.stdin {
-        builder.stdin(OsFile::try_from(file)?);
-    }
-    if config.inherit_stdout {
-        builder.inherit_stdout();
-    } else if let Some(file) = config.stdout {
-        builder.stdout(OsFile::try_from(file)?);
-    }
-    if config.inherit_stderr {
-        builder.inherit_stderr();
-    } else if let Some(file) = config.stderr {
-        builder.stderr(OsFile::try_from(file)?);
-    }
-    for preopen in config.preopens {
-        builder.preopened_dir(preopen.0, preopen.1);
-    }
-    Ok(WasiInstance::Preview1(WasiPreview1::new(
-        store,
-        builder.build()?,
-    )))
+    Ok(Rc::new(RefCell::new(builder.build())))
 }
 
 #[repr(C)]
@@ -300,10 +283,11 @@ pub unsafe extern "C" fn wasi_instance_new(
 
     let result = match CStr::from_ptr(name).to_str().unwrap_or("") {
         "wasi_snapshot_preview1" => {
-            create_preview1_instance(store, *config).map_err(|e| e.to_string())
+            create_wasi_ctx(*config).map(|cx| WasiInstance::Preview1(WasiPreview1::new(store, cx)))
         }
-        "wasi_unstable" => create_snapshot0_instance(store, *config).map_err(|e| e.to_string()),
-        _ => Err("unsupported WASI version".into()),
+        "wasi_unstable" => create_wasi_ctx(*config)
+            .map(|cx| WasiInstance::Snapshot0(WasiSnapshot0::new(store, cx))),
+        _ => Err(anyhow::anyhow!("unsupported WASI version")),
     };
 
     match result {
@@ -312,7 +296,9 @@ pub unsafe extern "C" fn wasi_instance_new(
             export_cache: HashMap::new(),
         })),
         Err(e) => {
-            *trap = Box::into_raw(Box::new(wasm_trap_t { trap: Trap::new(e) }));
+            *trap = Box::into_raw(Box::new(wasm_trap_t {
+                trap: Trap::from(e),
+            }));
 
             None
         }
@@ -328,7 +314,7 @@ pub extern "C" fn wasi_instance_bind_import<'a>(
     import: &wasm_importtype_t,
 ) -> Option<&'a wasm_extern_t> {
     let module = &import.module;
-    let name = str::from_utf8(import.name.as_bytes()).ok()?;
+    let name = str::from_utf8(import.name.as_ref()?.as_bytes()).ok()?;
 
     let export = match &instance.wasi {
         WasiInstance::Preview1(wasi) => {
