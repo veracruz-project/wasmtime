@@ -2,7 +2,7 @@
 
 use crate::object::utils::try_parse_func_name;
 use object::read::{Object, ObjectSection, Relocation, RelocationTarget};
-use object::{elf, File, RelocationEncoding, RelocationKind};
+use object::{elf, File, ObjectSymbol, RelocationEncoding, RelocationKind};
 use std::ptr::{read_unaligned, write_unaligned};
 use wasmtime_environ::entity::PrimaryMap;
 use wasmtime_environ::wasm::DefinedFuncIndex;
@@ -47,7 +47,7 @@ fn apply_reloc(
             // wasm function or runtime libcall.
             let sym = obj.symbol_by_index(i).unwrap();
             match sym.name() {
-                Some(name) => {
+                Ok(name) => {
                     if let Some(index) = try_parse_func_name(name) {
                         match module.defined_func_index(index) {
                             Some(f) => {
@@ -62,7 +62,7 @@ fn apply_reloc(
                         panic!("unknown function to link: {}", name);
                     }
                 }
-                None => panic!("unexpected relocation target: not a symbol"),
+                Err(_) => panic!("unexpected relocation target: not a symbol"),
             }
         }
         _ => panic!("unexpected relocation target"),
@@ -110,6 +110,19 @@ fn apply_reloc(
                 "relocation too large to fit in i32"
             );
             write_unaligned(reloc_address as *mut u32, reloc_delta_u64 as u32);
+        },
+        #[cfg(target_pointer_width = "64")]
+        (RelocationKind::Relative, RelocationEncoding::S390xDbl, 32) => unsafe {
+            let reloc_address = body.add(offset as usize) as usize;
+            let reloc_addend = r.addend() as isize;
+            let reloc_delta_u64 = (target_func_address as u64)
+                .wrapping_sub(reloc_address as u64)
+                .wrapping_add(reloc_addend as u64);
+            assert!(
+                (reloc_delta_u64 as isize) >> 1 <= i32::max_value() as isize,
+                "relocation too large to fit in i32"
+            );
+            write_unaligned(reloc_address as *mut u32, (reloc_delta_u64 >> 1) as u32);
         },
         (RelocationKind::Elf(elf::R_AARCH64_CALL26), RelocationEncoding::Generic, 32) => unsafe {
             let reloc_address = body.add(offset as usize) as usize;

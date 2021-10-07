@@ -1,12 +1,13 @@
 //! Compilation backend pipeline: optimized IR to VCode / binemit.
 
 use crate::ir::Function;
+use crate::log::DeferredDisplay;
 use crate::machinst::*;
 use crate::settings;
 use crate::timing;
 
 use log::debug;
-use regalloc::{allocate_registers_with_opts, Algorithm, Options};
+use regalloc::{allocate_registers_with_opts, Algorithm, Options, PrettyPrint};
 
 /// Compile the given function down to VCode with allocated registers, ready
 /// for binary emission.
@@ -14,23 +15,26 @@ pub fn compile<B: LowerBackend + MachBackend>(
     f: &Function,
     b: &B,
     abi: Box<dyn ABICallee<I = B::MInst>>,
+    emit_info: <B::MInst as MachInstEmit>::Info,
 ) -> CodegenResult<VCode<B::MInst>>
 where
-    B::MInst: ShowWithRRU,
+    B::MInst: PrettyPrint,
 {
     // Compute lowered block order.
     let block_order = BlockLoweringOrder::new(f);
     // Build the lowering context.
-    let lower = Lower::new(f, abi, block_order)?;
+    let lower = Lower::new(f, abi, emit_info, block_order)?;
     // Lower the IR.
     let (mut vcode, stack_map_request_info) = {
         let _tt = timing::vcode_lower();
         lower.lower(b)?
     };
 
+    // Creating the vcode string representation may be costly for large functions, so defer its
+    // rendering.
     debug!(
         "vcode from lowering: \n{}",
-        vcode.show_rru(Some(b.reg_universe()))
+        DeferredDisplay::new(|| vcode.show_rru(Some(b.reg_universe())))
     );
 
     // Perform register allocation.
@@ -102,7 +106,7 @@ where
 
     debug!(
         "vcode after regalloc: final version:\n{}",
-        vcode.show_rru(Some(b.reg_universe()))
+        DeferredDisplay::new(|| vcode.show_rru(Some(b.reg_universe())))
     );
 
     Ok(vcode)

@@ -18,9 +18,8 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::option_map_unwrap_or,
-        clippy::option_map_unwrap_or_else,
-        clippy::print_stdout,
+        clippy::map_unwrap_or,
+        clippy::clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
@@ -29,7 +28,7 @@
 pub use crate::error::{Location, ParseError, ParseResult};
 pub use crate::isaspec::{parse_options, IsaSpec, ParseOptionError};
 pub use crate::parser::{parse_functions, parse_run_command, parse_test, ParseOptions};
-pub use crate::run_command::{Comparison, DataValue, DataValueCastFailure, Invocation, RunCommand};
+pub use crate::run_command::{Comparison, Invocation, RunCommand};
 pub use crate::sourcemap::SourceMap;
 pub use crate::testcommand::{TestCommand, TestOption};
 pub use crate::testfile::{Comment, Details, Feature, TestFile};

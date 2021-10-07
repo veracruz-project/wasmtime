@@ -3,8 +3,7 @@ use std::cell::UnsafeCell;
 use std::marker;
 use wiggle::{BorrowHandle, GuestMemory, Region};
 
-mod borrow;
-use borrow::BorrowChecker;
+use wiggle_borrow::BorrowChecker;
 
 #[derive(Debug, Clone)]
 pub struct MemAreas(Vec<MemArea>);
@@ -126,14 +125,23 @@ unsafe impl GuestMemory for HostMemory {
     fn has_outstanding_borrows(&self) -> bool {
         self.bc.has_outstanding_borrows()
     }
-    fn is_borrowed(&self, r: Region) -> bool {
-        self.bc.is_borrowed(r)
+    fn is_shared_borrowed(&self, r: Region) -> bool {
+        self.bc.is_shared_borrowed(r)
     }
-    fn borrow(&self, r: Region) -> Result<BorrowHandle, GuestError> {
-        self.bc.borrow(r)
+    fn is_mut_borrowed(&self, r: Region) -> bool {
+        self.bc.is_mut_borrowed(r)
     }
-    fn unborrow(&self, h: BorrowHandle) {
-        self.bc.unborrow(h)
+    fn mut_borrow(&self, r: Region) -> Result<BorrowHandle, GuestError> {
+        self.bc.mut_borrow(r)
+    }
+    fn shared_borrow(&self, r: Region) -> Result<BorrowHandle, GuestError> {
+        self.bc.shared_borrow(r)
+    }
+    fn shared_unborrow(&self, h: BorrowHandle) {
+        self.bc.shared_unborrow(h)
+    }
+    fn mut_unborrow(&self, h: BorrowHandle) {
+        self.bc.mut_unborrow(h)
     }
 }
 
@@ -339,17 +347,10 @@ impl<'a> WasiCtx<'a> {
 // with these errors. We just push them to vecs.
 #[macro_export]
 macro_rules! impl_errno {
-    ( $errno:ty, $convert:path ) => {
+    ( $errno:ty ) => {
         impl wiggle::GuestErrorType for $errno {
             fn success() -> $errno {
                 <$errno>::Ok
-            }
-        }
-        impl<'a> $convert for WasiCtx<'a> {
-            fn into_errno(&self, e: wiggle::GuestError) -> $errno {
-                eprintln!("GuestError: {:?}", e);
-                self.guest_errors.borrow_mut().push(e);
-                <$errno>::InvalidArg
             }
         }
     };

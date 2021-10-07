@@ -2,6 +2,404 @@
 
 --------------------------------------------------------------------------------
 
+## Unreleased
+
+## 0.27.0
+
+Released 2021-05-21.
+
+### Security Fixes
+
+* Fixed a security issue in Cranelift's x64 backend that could result in a heap
+  sandbox escape due to an incorrect sign-extension:
+  [#2913](https://github.com/bytecodealliance/wasmtime/issues/2913).
+
+### Added
+
+* Support for IBM z/Archiecture (`s390x`) machines in Cranelift and Wasmtime:
+  [#2836](https://github.com/bytecodealliance/wasmtime/pull/2836),
+  [#2837](https://github.com/bytecodealliance/wasmtime/pull/2837),
+  [#2838](https://github.com/bytecodealliance/wasmtime/pull/2838),
+  [#2843](https://github.com/bytecodealliance/wasmtime/pull/2843),
+  [#2854](https://github.com/bytecodealliance/wasmtime/pull/2854),
+  [#2870](https://github.com/bytecodealliance/wasmtime/pull/2870),
+  [#2871](https://github.com/bytecodealliance/wasmtime/pull/2871),
+  [#2872](https://github.com/bytecodealliance/wasmtime/pull/2872),
+  [#2874](https://github.com/bytecodealliance/wasmtime/pull/2874).
+
+* Improved async support in wasi-common runtime:
+  [#2832](https://github.com/bytecodealliance/wasmtime/pull/2832).
+
+* Added `Store::with_limits`, `StoreLimits`, and `ResourceLimiter` to the
+  Wasmtime API to help with enforcing resource limits at runtime. The
+  `ResourceLimiter` trait can be implemented by custom resource limiters to
+  decide if linear memories or tables can be grown.
+
+* Added `allow-unknown-exports` option for the run command:
+  [#2879](https://github.com/bytecodealliance/wasmtime/pull/2879).
+
+* Added API to notify that a `Store` has moved to a new thread:
+  [#2822](https://github.com/bytecodealliance/wasmtime/pull/2822).
+
+* Documented guidance around using Wasmtime in multithreaded contexts:
+  [#2812](https://github.com/bytecodealliance/wasmtime/pull/2812).
+  In the future, the Wasmtime API will change to allow some of its core types
+  to be Send/Sync; see the in-progress
+  [#2897](https://github.com/bytecodealliance/wasmtime/pull/2897) for details.
+
+* Support calls from native code to multiple-return-value functions:
+  [#2806](https://github.com/bytecodealliance/wasmtime/pull/2806).
+
+### Changed
+
+* Breaking: `Memory::new` has been changed to return `Result` as creating a
+  host memory object is now a fallible operation when the initial size of
+  the memory exceeds the store limits.
+
+### Fixed
+
+* Many instruction selection improvements on x64 and aarch64:
+  [#2819](https://github.com/bytecodealliance/wasmtime/pull/2819),
+  [#2828](https://github.com/bytecodealliance/wasmtime/pull/2828),
+  [#2823](https://github.com/bytecodealliance/wasmtime/pull/2823),
+  [#2862](https://github.com/bytecodealliance/wasmtime/pull/2862),
+  [#2886](https://github.com/bytecodealliance/wasmtime/pull/2886),
+  [#2889](https://github.com/bytecodealliance/wasmtime/pull/2889),
+  [#2905](https://github.com/bytecodealliance/wasmtime/pull/2905).
+
+* Improved performance of Wasmtime runtime substantially:
+  [#2811](https://github.com/bytecodealliance/wasmtime/pull/2811),
+  [#2818](https://github.com/bytecodealliance/wasmtime/pull/2818),
+  [#2821](https://github.com/bytecodealliance/wasmtime/pull/2821),
+  [#2847](https://github.com/bytecodealliance/wasmtime/pull/2847),
+  [#2900](https://github.com/bytecodealliance/wasmtime/pull/2900).
+
+* Fixed WASI issue with file metadata on Windows:
+  [#2884](https://github.com/bytecodealliance/wasmtime/pull/2884).
+
+* Fixed an issue with debug info and an underflowing (trapping) offset:
+  [#2866](https://github.com/bytecodealliance/wasmtime/pull/2866).
+
+* Fixed an issue with unwind information in the old x86 backend:
+  [#2845](https://github.com/bytecodealliance/wasmtime/pull/2845).
+
+* Fixed i32 spilling in x64 backend:
+  [#2840](https://github.com/bytecodealliance/wasmtime/pull/2840).
+
+## 0.26.0
+
+Released 2021-04-05.
+
+### Added
+
+* Added the `wasmtime compile` command to support AOT compilation of Wasm
+  modules. This adds the `Engine::precompile_module` method. Also added the
+  `Config::target` method to change the compilation target of the
+  configuration. This can be used in conjunction with
+  `Engine::precompile_module` to target a different host triple than the
+  current one.
+  [#2791](https://github.com/bytecodealliance/wasmtime/pull/2791)
+
+* Support for macOS on aarch64 (Apple M1 Silicon), including Apple-specific
+  calling convention details and unwinding/exception handling using Mach ports.
+  [#2742](https://github.com/bytecodealliance/wasmtime/pull/2742),
+  [#2723](https://github.com/bytecodealliance/wasmtime/pull/2723)
+
+* A number of SIMD instruction implementations in the new x86-64 backend.
+  [#2771](https://github.com/bytecodealliance/wasmtime/pull/2771)
+
+* Added the `Config::cranelift_flag_enable` method to enable setting Cranelift
+  boolean flags or presets in a config.
+
+* Added CLI option `--cranelift-enable` to enable boolean settings and ISA presets.
+
+* Deduplicate function signatures in Wasm modules.
+  [#2772](https://github.com/bytecodealliance/wasmtime/pull/2772)
+
+* Optimize overheads of calling into Wasm functions.
+  [#2757](https://github.com/bytecodealliance/wasmtime/pull/2757),
+  [#2759](https://github.com/bytecodealliance/wasmtime/pull/2759)
+
+* Improvements related to Module Linking: compile fewer trampolines; 
+
+  [#2774](https://github.com/bytecodealliance/wasmtime/pull/2774)
+
+* Re-export sibling crates from `wasmtime-wasi` to make embedding easier
+  without needing to match crate versions.
+  [#2776](https://github.com/bytecodealliance/wasmtime/pull/2776)
+
+### Changed
+
+* Switched the default compiler backend on x86-64 to Cranelift's new backend.
+  This should not have any user-visible effects other than possibly runtime
+  performance improvements. The old backend is still available with the
+  `old-x86-backend` feature flag to the `cranelift-codegen` or `wasmtime`
+  crates, or programmatically with `BackendVariant::Legacy`. We plan to
+  maintain the old backend for at least one more release and ensure it works on
+  CI.
+  [#2718](https://github.com/bytecodealliance/wasmtime/pull/2718)
+
+* Breaking: `Module::deserialize` has been removed in favor of `Module::new`.
+
+* Breaking: `Config::cranelift_clear_cpu_flags` was removed. Use `Config::target`
+  to clear the CPU flags for the host's target.
+
+* Breaking: `Config::cranelift_other_flag` was renamed to `Config::cranelift_flag_set`.
+
+* CLI changes:
+  * Wasmtime CLI options to enable WebAssembly features have been replaced with
+    a singular `--wasm-features` option. The previous options are still
+    supported, but are not displayed in help text.
+  * Breaking: the CLI option `--cranelift-flags` was changed to
+    `--cranelift-set`.
+  * Breaking: the CLI option `--enable-reference-types=false` has been changed
+    to `--wasm-features=-reference-types`.
+  * Breaking: the CLI option `--enable-multi-value=false` has been changed to
+    `--wasm-features=-multi-value`.
+  * Breaking: the CLI option `--enable-bulk-memory=false` has been changed to
+    `--wasm-features=-bulk-memory`.
+
+* Improved error-reporting in wiggle.
+  [#2760](https://github.com/bytecodealliance/wasmtime/pull/2760)
+
+* Make WASI sleeping fallible (some systems do not support sleep).
+  [#2756](https://github.com/bytecodealliance/wasmtime/pull/2756)
+
+* WASI: Support `poll_oneoff` with a sleep.
+  [#2753](https://github.com/bytecodealliance/wasmtime/pull/2753)
+
+* Allow a `StackMapSink` to be passed when defining functions with
+  `cranelift-module`.
+  [#2739](https://github.com/bytecodealliance/wasmtime/pull/2739)
+
+* Some refactoring in new x86-64 backend to prepare for VEX/EVEX (e.g.,
+  AVX-512) instruction encodings to be supported.
+  [#2799](https://github.com/bytecodealliance/wasmtime/pull/2799)
+
+### Fixed
+
+* Fixed a corner case in `srem` (signed remainder) in the new x86-64 backend:
+  `INT_MIN % -1` should return `0`, rather than trapping. This only occurred
+  when `avoid_div_traps == false` was set by the embedding.
+  [#2763](https://github.com/bytecodealliance/wasmtime/pull/2763)
+
+* Fixed a memory leak of the `Store` when an instance traps.
+  [#2803](https://github.com/bytecodealliance/wasmtime/pull/2803)
+
+* Some fuzzing-related fixes.
+  [#2788](https://github.com/bytecodealliance/wasmtime/pull/2788),
+  [#2770](https://github.com/bytecodealliance/wasmtime/pull/2770)
+
+* Fixed memory-initialization bug in uffd allocator that could copy into the
+  wrong destination under certain conditions. Does not affect the default
+  wasmtime instance allocator.
+  [#2801](https://github.com/bytecodealliance/wasmtime/pull/2801)
+
+* Fix printing of float values from the Wasmtime CLI.
+  [#2797](https://github.com/bytecodealliance/wasmtime/pull/2797)
+
+* Remove the ability for the `Linker` to instantiate modules with duplicate
+  import strings of different types.
+  [#2789](https://github.com/bytecodealliance/wasmtime/pull/2789)
+
+## 0.25.0
+
+Released 2021-03-16.
+
+### Added
+
+* An implementation of a pooling instance allocator, optionally backed by
+  `userfaultfd` on Linux, was added to improve the performance of embeddings
+  that instantiate a large number of instances continuously.
+  [#2518](https://github.com/bytecodealliance/wasmtime/pull/2518)
+
+* Host functions can now be defined on `Config` to share the function across all
+  `Store` objects connected to an `Engine`. This can improve the time it takes
+  to instantiate instances in a short-lived `Store`.
+  [#2625](https://github.com/bytecodealliance/wasmtime/pull/2625)
+
+* The `Store` object now supports having typed values attached to it which can
+  be retrieved from host functions.
+  [#2625](https://github.com/bytecodealliance/wasmtime/pull/2625)
+
+* The `wiggle` code generator now supports `async` host functions.
+  [#2701](https://github.com/bytecodealliance/wasmtime/pull/2701)
+
+### Changed
+
+* The `Func::getN{,_async}` APIs have all been removed in favor of a new
+  `Func::typed` API which should be more compact in terms of API surface area as
+  well as more flexible in how it can be used.
+  [#2719](https://github.com/bytecodealliance/wasmtime/pull/2719)
+
+* `Engine::new` has been changed from returning `Engine` to returning
+  `anyhow::Result<Engine>`. Callers of `Engine::new` will need to be updated to
+  use the `?` operator on the return value or otherwise unwrap the result to get
+  the `Engine`.
+
+### Fixed
+
+* Interpretation of timestamps in `poll_oneoff` for WASI have been fixed to
+  correctly use nanoseconds instead of microseconds.
+  [#2717](https://github.com/bytecodealliance/wasmtime/pull/2717)
+
+## 0.24.0
+
+Released 2021-03-04.
+
+### Added
+
+* Implement support for `async` functions in Wasmtime
+  [#2434](https://github.com/bytecodealliance/wasmtime/pull/2434)
+
+### Fixed
+
+* Fix preservation of the sigaltstack on macOS
+  [#2676](https://github.com/bytecodealliance/wasmtime/pull/2676)
+* Fix incorrect semver dependencies involving fs-set-times.
+  [#2705](https://github.com/bytecodealliance/wasmtime/pull/2705)
+* Fix some `i128` shift-related bugs in x64 backend.
+  [#2682](https://github.com/bytecodealliance/wasmtime/pull/2682)
+* Fix incomplete trap metadata due to multiple traps at one address
+  [#2685](https://github.com/bytecodealliance/wasmtime/pull/2685)
+
+## 0.23.0
+
+Released 2021-02-16.
+
+### Added
+
+* Support for limiting WebAssembly execution with fuel was added, including
+  support in the C API.
+  [#2611](https://github.com/bytecodealliance/wasmtime/pull/2611)
+  [#2643](https://github.com/bytecodealliance/wasmtime/pull/2643)
+* Wasmtime now has more knobs for limiting memory and table allocations
+  [#2617](https://github.com/bytecodealliance/wasmtime/pull/2617)
+* Added a method to share `Config` across machines
+  [#2608](https://github.com/bytecodealliance/wasmtime/pull/2608)
+* Added a safe memory read/write API
+  [#2528](https://github.com/bytecodealliance/wasmtime/pull/2528)
+* Added support for the experimental wasi-crypto APIs
+  [#2597](https://github.com/bytecodealliance/wasmtime/pull/2597)
+* Added an instance limit to `Config`
+  [#2593](https://github.com/bytecodealliance/wasmtime/pull/2593)
+* Implemented module-linking's outer module aliases
+  [#2590](https://github.com/bytecodealliance/wasmtime/pull/2590)
+* Cranelift now supports 128-bit operations for the new x64 backend.
+  [#2539](https://github.com/bytecodealliance/wasmtime/pull/2539)
+* Cranelift now has detailed debug-info (DWARF) support in new backends (initially x64).
+  [#2565](https://github.com/bytecodealliance/wasmtime/pull/2565)
+* Cranelift now uses the `POPCNT`, `TZCNT`, and `LZCNT`, as well as SSE 4.1
+  rounding instructions on x64 when available.
+* Cranelift now uses the `CNT`, instruction on aarch64 when available.
+
+### Changed
+
+* A new WASI implementation built on the new
+  [`cap-std`](https://github.com/bytecodealliance/cap-std) crate was added,
+  replacing the previous implementation. This brings improved robustness,
+  portability, and performance.
+
+* `wasmtime_wasi::WasiCtxBuilder` moved to
+  `wasi_cap_std_sync::WasiCtxBuilder`.
+
+* The WebAssembly C API is updated, with a few minor API changes
+  [#2579](https://github.com/bytecodealliance/wasmtime/pull/2579)
+
+### Fixed
+
+* Fixed a panic in WASI `fd_readdir` on large directories
+  [#2620](https://github.com/bytecodealliance/wasmtime/pull/2620)
+* Fixed a memory leak with command modules
+  [#2017](https://github.com/bytecodealliance/wasmtime/pull/2017)
+
+--------------------------------------------------------------------------------
+
+## 0.22.0
+
+Released 2021-01-07.
+
+### Added
+
+* Experimental support for [the module-linking
+  proposal](https://github.com/WebAssembly/module-linking) was
+  added. [#2094](https://github.com/bytecodealliance/wasmtime/pull/2094)
+
+* Added support for [the reference types
+  proposal](https://webassembly.github.io/reference-types) on the aarch64
+  architecture. [#2410](https://github.com/bytecodealliance/wasmtime/pull/2410)
+
+* Experimental support for [wasi-nn](https://github.com/WebAssembly/wasi-nn) was
+  added. [#2208](https://github.com/bytecodealliance/wasmtime/pull/2208)
+
+### Changed
+
+### Fixed
+
+* Fixed an issue where the `select` instruction didn't accept `v128` SIMD
+  operands. [#2391](https://github.com/bytecodealliance/wasmtime/pull/2391)
+
+* Fixed an issue where Wasmtime could potentially use the wrong stack map during
+  GCs, leading to a
+  panic. [#2396](https://github.com/bytecodealliance/wasmtime/pull/2396)
+
+* Fixed an issue where if a host-defined function erroneously returned a value
+  from a different store, that value would be
+  leaked. [#2424](https://github.com/bytecodealliance/wasmtime/pull/2424)
+
+* Fixed a bug where in certain cases if a module's instantiation failed, it
+  could leave trampolines in the store that referenced the no-longer-valid
+  instance. These trampolines could be reused in future instantiations, leading
+  to use after free bugs.
+  [#2408](https://github.com/bytecodealliance/wasmtime/pull/2408)
+
+* Fixed a miscompilation on aarch64 where certain instructions would read `SP`
+  instead of the zero register. This could only affect you if you explicitly
+  enabled the Wasm SIMD
+  proposal. [#2548](https://github.com/bytecodealliance/wasmtime/pull/2548)
+
+--------------------------------------------------------------------------------
+
+## 0.21.0
+
+Released 2020-11-05.
+
+### Added
+
+* Experimental support for the multi-memory proposal was added.
+  [#2263](https://github.com/bytecodealliance/wasmtime/pull/2263)
+
+* The `Trap::trap_code` API enables learning what kind of trap was raised.
+  [#2309](https://github.com/bytecodealliance/wasmtime/pull/2309)
+
+### Changed
+
+* WebAssembly module validation is now parallelized.
+  [#2059](https://github.com/bytecodealliance/wasmtime/pull/2059)
+
+* Documentation is now available at docs.wasmtime.dev.
+  [#2317](https://github.com/bytecodealliance/wasmtime/pull/2317)
+
+* Windows now compiles like other platforms with a huge guard page instead of
+  having its own custom limit which made modules compile and run more slowly.
+  [#2326](https://github.com/bytecodealliance/wasmtime/pull/2326)
+
+* The size of the cache entry for serialized modules has been greatly reduced.
+  [#2321](https://github.com/bytecodealliance/wasmtime/pull/2321)
+  [#2322](https://github.com/bytecodealliance/wasmtime/pull/2322)
+  [#2324](https://github.com/bytecodealliance/wasmtime/pull/2324)
+  [#2325](https://github.com/bytecodealliance/wasmtime/pull/2325)
+
+* The `FuncType` API constructor and accessors are now iterator-based.
+  [#2365](https://github.com/bytecodealliance/wasmtime/pull/2365)
+
+### Fixed
+
+* A panic in compiling reference-types-using modules has been fixed.
+  [#2350](https://github.com/bytecodealliance/wasmtime/pull/2350)
+
+--------------------------------------------------------------------------------
+
 ## 0.20.0
 
 Released 2020-09-23.

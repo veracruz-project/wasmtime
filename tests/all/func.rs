@@ -1,4 +1,6 @@
 use anyhow::Result;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use wasmtime::*;
 
@@ -78,26 +80,26 @@ fn signatures_match() {
     let store = Store::default();
 
     let f = Func::wrap(&store, || {});
-    assert_eq!(f.ty().params(), &[]);
+    assert_eq!(f.ty().params().collect::<Vec<_>>(), &[]);
     assert_eq!(f.param_arity(), 0);
-    assert_eq!(f.ty().results(), &[]);
+    assert_eq!(f.ty().results().collect::<Vec<_>>(), &[]);
     assert_eq!(f.result_arity(), 0);
 
     let f = Func::wrap(&store, || -> i32 { loop {} });
-    assert_eq!(f.ty().params(), &[]);
-    assert_eq!(f.ty().results(), &[ValType::I32]);
+    assert_eq!(f.ty().params().collect::<Vec<_>>(), &[]);
+    assert_eq!(f.ty().results().collect::<Vec<_>>(), &[ValType::I32]);
 
     let f = Func::wrap(&store, || -> i64 { loop {} });
-    assert_eq!(f.ty().params(), &[]);
-    assert_eq!(f.ty().results(), &[ValType::I64]);
+    assert_eq!(f.ty().params().collect::<Vec<_>>(), &[]);
+    assert_eq!(f.ty().results().collect::<Vec<_>>(), &[ValType::I64]);
 
     let f = Func::wrap(&store, || -> f32 { loop {} });
-    assert_eq!(f.ty().params(), &[]);
-    assert_eq!(f.ty().results(), &[ValType::F32]);
+    assert_eq!(f.ty().params().collect::<Vec<_>>(), &[]);
+    assert_eq!(f.ty().results().collect::<Vec<_>>(), &[ValType::F32]);
 
     let f = Func::wrap(&store, || -> f64 { loop {} });
-    assert_eq!(f.ty().params(), &[]);
-    assert_eq!(f.ty().results(), &[ValType::F64]);
+    assert_eq!(f.ty().params().collect::<Vec<_>>(), &[]);
+    assert_eq!(f.ty().results().collect::<Vec<_>>(), &[ValType::F64]);
 
     let f = Func::wrap(
         &store,
@@ -106,7 +108,7 @@ fn signatures_match() {
         },
     );
     assert_eq!(
-        f.ty().params(),
+        f.ty().params().collect::<Vec<_>>(),
         &[
             ValType::F32,
             ValType::F64,
@@ -117,13 +119,10 @@ fn signatures_match() {
             ValType::FuncRef,
         ]
     );
-    assert_eq!(f.ty().results(), &[ValType::F64]);
+    assert_eq!(f.ty().results().collect::<Vec<_>>(), &[ValType::F64]);
 }
 
 #[test]
-// Note: Cranelift only supports refrerence types (used in the wasm in this
-// test) on x64.
-#[cfg(target_arch = "x86_64")]
 fn import_works() -> Result<()> {
     static HITS: AtomicUsize = AtomicUsize::new(0);
 
@@ -156,7 +155,7 @@ fn import_works() -> Result<()> {
     )?;
     let mut config = Config::new();
     config.wasm_reference_types(true);
-    let engine = Engine::new(&config);
+    let engine = Engine::new(&config)?;
     let store = Store::new(&engine);
     let module = Module::new(&engine, &wasm)?;
     let instance = Instance::new(
@@ -243,58 +242,57 @@ fn trap_import() -> Result<()> {
 fn get_from_wrapper() {
     let store = Store::default();
     let f = Func::wrap(&store, || {});
-    assert!(f.get0::<()>().is_ok());
-    assert!(f.get0::<i32>().is_err());
-    assert!(f.get1::<(), ()>().is_ok());
-    assert!(f.get1::<i32, ()>().is_err());
-    assert!(f.get1::<i32, i32>().is_err());
-    assert!(f.get2::<(), (), ()>().is_ok());
-    assert!(f.get2::<i32, i32, ()>().is_err());
-    assert!(f.get2::<i32, i32, i32>().is_err());
+    assert!(f.typed::<(), ()>().is_ok());
+    assert!(f.typed::<(), i32>().is_err());
+    assert!(f.typed::<(), ()>().is_ok());
+    assert!(f.typed::<i32, ()>().is_err());
+    assert!(f.typed::<i32, i32>().is_err());
+    assert!(f.typed::<(i32, i32), ()>().is_err());
+    assert!(f.typed::<(i32, i32), i32>().is_err());
 
     let f = Func::wrap(&store, || -> i32 { loop {} });
-    assert!(f.get0::<i32>().is_ok());
+    assert!(f.typed::<(), i32>().is_ok());
     let f = Func::wrap(&store, || -> f32 { loop {} });
-    assert!(f.get0::<f32>().is_ok());
+    assert!(f.typed::<(), f32>().is_ok());
     let f = Func::wrap(&store, || -> f64 { loop {} });
-    assert!(f.get0::<f64>().is_ok());
+    assert!(f.typed::<(), f64>().is_ok());
     let f = Func::wrap(&store, || -> Option<ExternRef> { loop {} });
-    assert!(f.get0::<Option<ExternRef>>().is_ok());
+    assert!(f.typed::<(), Option<ExternRef>>().is_ok());
     let f = Func::wrap(&store, || -> Option<Func> { loop {} });
-    assert!(f.get0::<Option<Func>>().is_ok());
+    assert!(f.typed::<(), Option<Func>>().is_ok());
 
     let f = Func::wrap(&store, |_: i32| {});
-    assert!(f.get1::<i32, ()>().is_ok());
-    assert!(f.get1::<i64, ()>().is_err());
-    assert!(f.get1::<f32, ()>().is_err());
-    assert!(f.get1::<f64, ()>().is_err());
+    assert!(f.typed::<i32, ()>().is_ok());
+    assert!(f.typed::<i64, ()>().is_err());
+    assert!(f.typed::<f32, ()>().is_err());
+    assert!(f.typed::<f64, ()>().is_err());
     let f = Func::wrap(&store, |_: i64| {});
-    assert!(f.get1::<i64, ()>().is_ok());
+    assert!(f.typed::<i64, ()>().is_ok());
     let f = Func::wrap(&store, |_: f32| {});
-    assert!(f.get1::<f32, ()>().is_ok());
+    assert!(f.typed::<f32, ()>().is_ok());
     let f = Func::wrap(&store, |_: f64| {});
-    assert!(f.get1::<f64, ()>().is_ok());
+    assert!(f.typed::<f64, ()>().is_ok());
     let f = Func::wrap(&store, |_: Option<ExternRef>| {});
-    assert!(f.get1::<Option<ExternRef>, ()>().is_ok());
+    assert!(f.typed::<Option<ExternRef>, ()>().is_ok());
     let f = Func::wrap(&store, |_: Option<Func>| {});
-    assert!(f.get1::<Option<Func>, ()>().is_ok());
+    assert!(f.typed::<Option<Func>, ()>().is_ok());
 }
 
 #[test]
 fn get_from_signature() {
     let store = Store::default();
-    let ty = FuncType::new(Box::new([]), Box::new([]));
+    let ty = FuncType::new(None, None);
     let f = Func::new(&store, ty, |_, _, _| panic!());
-    assert!(f.get0::<()>().is_ok());
-    assert!(f.get0::<i32>().is_err());
-    assert!(f.get1::<i32, ()>().is_err());
+    assert!(f.typed::<(), ()>().is_ok());
+    assert!(f.typed::<(), i32>().is_err());
+    assert!(f.typed::<i32, ()>().is_err());
 
-    let ty = FuncType::new(Box::new([ValType::I32]), Box::new([ValType::F64]));
+    let ty = FuncType::new(Some(ValType::I32), Some(ValType::F64));
     let f = Func::new(&store, ty, |_, _, _| panic!());
-    assert!(f.get0::<()>().is_err());
-    assert!(f.get0::<i32>().is_err());
-    assert!(f.get1::<i32, ()>().is_err());
-    assert!(f.get1::<i32, f64>().is_ok());
+    assert!(f.typed::<(), ()>().is_err());
+    assert!(f.typed::<(), i32>().is_err());
+    assert!(f.typed::<i32, ()>().is_err());
+    assert!(f.typed::<i32, f64>().is_ok());
 }
 
 #[test]
@@ -314,17 +312,17 @@ fn get_from_module() -> anyhow::Result<()> {
     )?;
     let instance = Instance::new(&store, &module, &[])?;
     let f0 = instance.get_func("f0").unwrap();
-    assert!(f0.get0::<()>().is_ok());
-    assert!(f0.get0::<i32>().is_err());
+    assert!(f0.typed::<(), ()>().is_ok());
+    assert!(f0.typed::<(), i32>().is_err());
     let f1 = instance.get_func("f1").unwrap();
-    assert!(f1.get0::<()>().is_err());
-    assert!(f1.get1::<i32, ()>().is_ok());
-    assert!(f1.get1::<i32, f32>().is_err());
+    assert!(f1.typed::<(), ()>().is_err());
+    assert!(f1.typed::<i32, ()>().is_ok());
+    assert!(f1.typed::<i32, f32>().is_err());
     let f2 = instance.get_func("f2").unwrap();
-    assert!(f2.get0::<()>().is_err());
-    assert!(f2.get0::<i32>().is_ok());
-    assert!(f2.get1::<i32, ()>().is_err());
-    assert!(f2.get1::<i32, f32>().is_err());
+    assert!(f2.typed::<(), ()>().is_err());
+    assert!(f2.typed::<(), i32>().is_ok());
+    assert!(f2.typed::<i32, ()>().is_err());
+    assert!(f2.typed::<i32, f32>().is_err());
     Ok(())
 }
 
@@ -338,31 +336,32 @@ fn call_wrapped_func() -> Result<()> {
         assert_eq!(d, 4.0);
     });
     f.call(&[Val::I32(1), Val::I64(2), 3.0f32.into(), 4.0f64.into()])?;
-    f.get4::<i32, i64, f32, f64, ()>()?(1, 2, 3.0, 4.0)?;
+    f.typed::<(i32, i64, f32, f64), ()>()?
+        .call((1, 2, 3.0, 4.0))?;
 
     let f = Func::wrap(&store, || 1i32);
     let results = f.call(&[])?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].unwrap_i32(), 1);
-    assert_eq!(f.get0::<i32>()?()?, 1);
+    assert_eq!(f.typed::<(), i32>()?.call(())?, 1);
 
     let f = Func::wrap(&store, || 2i64);
     let results = f.call(&[])?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].unwrap_i64(), 2);
-    assert_eq!(f.get0::<i64>()?()?, 2);
+    assert_eq!(f.typed::<(), i64>()?.call(())?, 2);
 
     let f = Func::wrap(&store, || 3.0f32);
     let results = f.call(&[])?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].unwrap_f32(), 3.0);
-    assert_eq!(f.get0::<f32>()?()?, 3.0);
+    assert_eq!(f.typed::<(), f32>()?.call(())?, 3.0);
 
     let f = Func::wrap(&store, || 4.0f64);
     let results = f.call(&[])?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].unwrap_f64(), 4.0);
-    assert_eq!(f.get0::<f64>()?()?, 4.0);
+    assert_eq!(f.typed::<(), f64>()?.call(())?, 4.0);
     Ok(())
 }
 
@@ -434,7 +433,7 @@ fn caller_memory() -> anyhow::Result<()> {
 #[test]
 fn func_write_nothing() -> anyhow::Result<()> {
     let store = Store::default();
-    let ty = FuncType::new(Box::new([]), Box::new([ValType::I32]));
+    let ty = FuncType::new(None, Some(ValType::I32));
     let f = Func::new(&store, ty, |_, _, _| Ok(()));
     let err = f.call(&[]).unwrap_err().downcast::<Trap>()?;
     assert!(err
@@ -459,7 +458,7 @@ fn return_cross_store_value() -> anyhow::Result<()> {
     )?;
     let mut config = Config::new();
     config.wasm_reference_types(true);
-    let engine = Engine::new(&config);
+    let engine = Engine::new(&config)?;
     let module = Module::new(&engine, &wasm)?;
 
     let store1 = Store::new(&engine);
@@ -485,7 +484,7 @@ fn return_cross_store_value() -> anyhow::Result<()> {
 fn pass_cross_store_arg() -> anyhow::Result<()> {
     let mut config = Config::new();
     config.wasm_reference_types(true);
-    let engine = Engine::new(&config);
+    let engine = Engine::new(&config)?;
 
     let store1 = Store::new(&engine);
     let store2 = Store::new(&engine);
@@ -500,8 +499,8 @@ fn pass_cross_store_arg() -> anyhow::Result<()> {
 
     // And using `.get` followed by a function call also fails with cross-Store
     // arguments.
-    let f = store1_func.get1::<Option<Func>, ()>()?;
-    let result = f(Some(store2_func));
+    let f = store1_func.typed::<Option<Func>, ()>()?;
+    let result = f.call(Some(store2_func));
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("cross-`Store`"));
 
@@ -515,10 +514,290 @@ fn externref_signature_no_reference_types() -> anyhow::Result<()> {
     Func::new(
         &store,
         FuncType::new(
-            Box::new([ValType::FuncRef, ValType::ExternRef]),
-            Box::new([ValType::FuncRef, ValType::ExternRef]),
+            [ValType::FuncRef, ValType::ExternRef].iter().cloned(),
+            [ValType::FuncRef, ValType::ExternRef].iter().cloned(),
         ),
         |_, _, _| Ok(()),
     );
+    Ok(())
+}
+
+#[test]
+fn trampolines_always_valid() -> anyhow::Result<()> {
+    let func = {
+        // Compile two modules up front
+        let store = Store::default();
+        let module1 = Module::new(store.engine(), "(module (import \"\" \"\" (func)))")?;
+        let module2 = Module::new(store.engine(), "(module (func (export \"\")))")?;
+        // Start instantiating the first module, but this will fail.
+        // Historically this registered the module's trampolines with `Store`
+        // before the failure, but then after the failure the `Store` didn't
+        // hold onto the trampoline.
+        drop(Instance::new(&store, &module1, &[]));
+        drop(module1);
+
+        // Then instantiate another module which has the same function type (no
+        // parameters or results) which tries to use the trampoline defined in
+        // the previous module. Then we extract the function and, in another
+        // scope where everything is dropped, we call the func.
+        let i = Instance::new(&store, &module2, &[])?;
+        i.get_func("").unwrap()
+    };
+
+    // ... and no segfaults! right? right? ...
+    func.call(&[])?;
+    Ok(())
+}
+
+#[test]
+#[cfg(not(feature = "old-x86-backend"))]
+fn typed_multiple_results() -> anyhow::Result<()> {
+    let store = Store::default();
+    let module = Module::new(
+        store.engine(),
+        r#"
+            (module
+                (func (export "f0") (result i32 i64)
+                    i32.const 0
+                    i64.const 1)
+                (func (export "f1") (param i32 i32 i32) (result f32 f64)
+                    f32.const 2
+                    f64.const 3)
+            )
+
+        "#,
+    )?;
+    let instance = Instance::new(&store, &module, &[])?;
+    let f0 = instance.get_func("f0").unwrap();
+    assert!(f0.typed::<(), ()>().is_err());
+    assert!(f0.typed::<(), (i32, f32)>().is_err());
+    assert!(f0.typed::<(), i32>().is_err());
+    assert_eq!(f0.typed::<(), (i32, i64)>()?.call(())?, (0, 1));
+
+    let f1 = instance.get_func("f1").unwrap();
+    assert_eq!(
+        f1.typed::<(i32, i32, i32), (f32, f64)>()?.call((1, 2, 3))?,
+        (2., 3.)
+    );
+    Ok(())
+}
+
+#[test]
+fn trap_doesnt_leak() -> anyhow::Result<()> {
+    struct Canary(Rc<Cell<bool>>);
+
+    impl Drop for Canary {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    let store = Store::default();
+
+    // test that `Func::wrap` is correct
+    let canary1 = Canary(Rc::new(Cell::new(false)));
+    let dtor1_run = canary1.0.clone();
+    let f1 = Func::wrap(&store, move || -> Result<(), Trap> {
+        drop(&canary1);
+        Err(Trap::new(""))
+    });
+    assert!(f1.typed::<(), ()>()?.call(()).is_err());
+    assert!(f1.call(&[]).is_err());
+
+    // test that `Func::new` is correct
+    let canary2 = Canary(Rc::new(Cell::new(false)));
+    let dtor2_run = canary2.0.clone();
+    let f2 = Func::new(&store, FuncType::new(None, None), move |_, _, _| {
+        drop(&canary2);
+        Err(Trap::new(""))
+    });
+    assert!(f2.typed::<(), ()>()?.call(()).is_err());
+    assert!(f2.call(&[]).is_err());
+
+    // drop everything and ensure dtors are run
+    drop((store, f1, f2));
+    assert!(dtor1_run.get());
+    assert!(dtor2_run.get());
+    Ok(())
+}
+
+#[test]
+#[cfg(not(feature = "old-x86-backend"))]
+fn wrap_multiple_results() -> anyhow::Result<()> {
+    fn test<T>(store: &Store, t: T) -> anyhow::Result<()>
+    where
+        T: WasmRet + WasmResults + PartialEq + Copy + std::fmt::Debug + EqualToValues + 'static,
+    {
+        let f = Func::wrap(store, move || t);
+        assert_eq!(f.typed::<(), T>()?.call(())?, t);
+        assert!(t.eq_values(&f.call(&[])?));
+
+        let module = Module::new(store.engine(), &T::gen_wasm())?;
+        let instance = Instance::new(store, &module, &[f.into()])?;
+        let f = instance.get_func("foo").unwrap();
+
+        assert_eq!(f.typed::<(), T>()?.call(())?, t);
+        assert!(t.eq_values(&f.call(&[])?));
+        Ok(())
+    }
+
+    let store = Store::default();
+    // 0 element
+    test(&store, ())?;
+
+    // 1 element
+    test(&store, (1i32,))?;
+    test(&store, (2u32,))?;
+    test(&store, (3i64,))?;
+    test(&store, (4u64,))?;
+    test(&store, (5.0f32,))?;
+    test(&store, (6.0f64,))?;
+
+    // 2 element ...
+    test(&store, (7i32, 8i32))?;
+    test(&store, (7i32, 8i64))?;
+    test(&store, (7i32, 8f32))?;
+    test(&store, (7i32, 8f64))?;
+
+    test(&store, (7i64, 8i32))?;
+    test(&store, (7i64, 8i64))?;
+    test(&store, (7i64, 8f32))?;
+    test(&store, (7i64, 8f64))?;
+
+    test(&store, (7f32, 8i32))?;
+    test(&store, (7f32, 8i64))?;
+    test(&store, (7f32, 8f32))?;
+    test(&store, (7f32, 8f64))?;
+
+    test(&store, (7f64, 8i32))?;
+    test(&store, (7f64, 8i64))?;
+    test(&store, (7f64, 8f32))?;
+    test(&store, (7f64, 8f64))?;
+
+    // and beyond...
+    test(&store, (1i32, 2i32, 3i32))?;
+    test(&store, (1i32, 2f32, 3i32))?;
+    test(&store, (1f64, 2f32, 3i32))?;
+    test(&store, (1f64, 2i64, 3i32))?;
+    test(&store, (1f32, 2f32, 3i64, 4f64))?;
+    test(&store, (1f64, 2i64, 3i32, 4i64, 5f32))?;
+    test(&store, (1i32, 2f64, 3i64, 4f64, 5f64, 6f32))?;
+    test(&store, (1i64, 2i32, 3i64, 4f32, 5f32, 6i32, 7u64))?;
+    test(&store, (1u32, 2f32, 3u64, 4f64, 5i32, 6f32, 7u64, 8u32))?;
+    test(
+        &store,
+        (1f32, 2f64, 3f32, 4i32, 5u32, 6i64, 7f32, 8i32, 9u64),
+    )?;
+    return Ok(());
+
+    trait EqualToValues {
+        fn eq_values(&self, values: &[Val]) -> bool;
+        fn gen_wasm() -> String;
+    }
+
+    macro_rules! equal_tuples {
+        ($($cnt:tt ($($a:ident),*))*) => ($(
+            #[allow(non_snake_case)]
+            impl<$($a: EqualToValue,)*> EqualToValues for ($($a,)*) {
+                fn eq_values(&self, values: &[Val]) -> bool {
+                    let ($($a,)*) = self;
+                    let mut _values = values.iter();
+                    _values.len() == $cnt &&
+                        $($a.eq_value(_values.next().unwrap()) &&)*
+                        true
+                }
+
+                fn gen_wasm() -> String {
+                    let mut wasm = String::new();
+                    wasm.push_str("(module ");
+                    wasm.push_str("(type $t (func (result ");
+                    $(
+                        wasm.push_str($a::wasm_ty());
+                        wasm.push_str(" ");
+                    )*
+                    wasm.push_str(")))");
+
+                    wasm.push_str("(import \"\" \"\" (func $host (type $t)))");
+                    wasm.push_str("(func (export \"foo\") (type $t)");
+                    wasm.push_str("call $host");
+                    wasm.push_str(")");
+                    wasm.push_str(")");
+
+                    wasm
+                }
+            }
+        )*)
+    }
+
+    equal_tuples! {
+        0 ()
+        1 (A1)
+        2 (A1, A2)
+        3 (A1, A2, A3)
+        4 (A1, A2, A3, A4)
+        5 (A1, A2, A3, A4, A5)
+        6 (A1, A2, A3, A4, A5, A6)
+        7 (A1, A2, A3, A4, A5, A6, A7)
+        8 (A1, A2, A3, A4, A5, A6, A7, A8)
+        9 (A1, A2, A3, A4, A5, A6, A7, A8, A9)
+    }
+
+    trait EqualToValue {
+        fn eq_value(&self, value: &Val) -> bool;
+        fn wasm_ty() -> &'static str;
+    }
+
+    macro_rules! equal_values {
+        ($a:ident $($ty:ident $wasm:tt $variant:ident $e:expr,)*) => ($(
+            impl EqualToValue for $ty {
+                fn eq_value(&self, val: &Val) -> bool {
+                    if let Val::$variant($a) = *val {
+                        return *self == $e;
+                    }
+                    false
+                }
+
+                fn wasm_ty() -> &'static str {
+                    $wasm
+                }
+            }
+        )*)
+    }
+
+    equal_values! {
+        a
+        i32 "i32" I32 a,
+        u32 "i32" I32 a as u32,
+        i64 "i64" I64 a,
+        u64 "i64" I64 a as u64,
+        f32 "f32" F32 f32::from_bits(a),
+        f64 "f64" F64 f64::from_bits(a),
+    }
+}
+
+#[test]
+fn trampoline_for_declared_elem() -> anyhow::Result<()> {
+    let engine = Engine::default();
+
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+                (elem declare func $f)
+                (func $f)
+                (func (export "g") (result funcref)
+                  (ref.func $f)
+                )
+            )
+        "#,
+    )?;
+
+    let store = Store::new(&engine);
+    let instance = Instance::new(&store, &module, &[])?;
+
+    let g = instance.get_typed_func::<(), Option<Func>>("g")?;
+
+    let func = g.call(())?;
+    func.unwrap().call(&[])?;
     Ok(())
 }
