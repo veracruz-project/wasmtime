@@ -4,7 +4,10 @@ use std::fs;
 fn main() {
     let mut build = cc::Build::new();
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    let family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap();
+    // HACK FOR ICECAP
+    //let family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap();
+    let family = "aarch64";
+    // END HACK
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
 
     let family_file = format!("src/arch/{}.c", family);

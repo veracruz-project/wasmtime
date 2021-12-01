@@ -51,7 +51,8 @@ wasi-cap-std-sync = { path = "../wasi-common/cap-std-sync" }
 maintenance = { status = "actively-developed" }
 
 [features]
-default = ['async', 'cache', 'wat', 'jitdump', 'parallel-compilation']
+#default = ['async', 'cache', 'wat', 'jitdump', 'parallel-compilation']
+default = []
 
 # Enables experimental support for the lightbeam codegen backend, an alternative
 # to cranelift. Requires Nightly Rust currently, and this is not enabled by
