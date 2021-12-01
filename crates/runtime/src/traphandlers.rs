@@ -2,7 +2,6 @@
 //! signalhandling mechanisms.
 
 use crate::VMInterrupts;
-use backtrace::Backtrace;
 use std::any::Any;
 use std::cell::{Cell, UnsafeCell};
 use std::error::Error;
@@ -13,6 +12,14 @@ use std::sync::Once;
 use wasmtime_environ::ir;
 
 pub use self::tls::TlsRestore;
+
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "icecap")] {
+        use crate::backtrace::Backtrace;
+    } else {
+        use backtrace::Backtrace;
+    }
+}
 
 extern "C" {
     fn RegisterSetjmp(
@@ -33,6 +40,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(target_os = "windows")] {
         mod windows;
         use windows as sys;
+    } else if #[cfg(target_os = "icecap")] {
+        mod icecap;
+        use icecap as sys;
     }
 }
 

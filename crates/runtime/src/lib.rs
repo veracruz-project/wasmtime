@@ -59,6 +59,10 @@ pub use crate::vmcontext::{
 /// Version number of this crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(target_os = "icecap")]
+#[path = "icecap/backtrace.rs"]
+pub mod backtrace;
+
 /// The Cranelift IR type used for reference types for this target architecture.
 pub fn ref_type() -> wasmtime_environ::ir::Type {
     if cfg!(target_pointer_width = "32") {

@@ -8,6 +8,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(unix)] {
         mod systemv;
         pub use self::systemv::*;
+    } else if #[cfg(target_os = "icecap")] {
+        mod icecap;
+        pub use self::icecap::*;
     } else {
         compile_error!("unsupported target platform for unwind");
     }

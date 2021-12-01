@@ -1,8 +1,15 @@
 use crate::{FrameInfo, Store};
-use backtrace::Backtrace;
 use std::fmt;
 use std::sync::Arc;
 use wasmtime_environ::ir;
+
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "icecap")] {
+        use wasmtime_runtime::backtrace::Backtrace;
+    } else {
+        use backtrace::Backtrace;
+    }
+}
 
 /// A struct representing an aborted instruction execution, with a message
 /// indicating the cause.
@@ -216,6 +223,7 @@ impl Trap {
     ) -> Self {
         let mut wasm_trace = Vec::new();
         let mut hint_wasm_backtrace_details_env = false;
+        #[cfg(not(target_os = "icecap"))]
         wasmtime_runtime::with_last_info(|last| {
             // If the `store` passed in is `None` then we look at the `last`
             // store configured to call wasm, and if that's a `Store` we use
