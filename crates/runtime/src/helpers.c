@@ -4,7 +4,7 @@
 // explicitly pass a 0 argument to `sigsetjmp` that we don't need to preserve
 // the process signal mask. This should make this call a bit faster b/c it
 // doesn't need to touch the kernel signal handling routines.
-#ifdef CFG_TARGET_OS_windows
+#if CFG_TARGET_OS_windows || CFG_TARGET_OS_icecap
 #define platform_setjmp(buf) setjmp(buf)
 #define platform_longjmp(buf, arg) longjmp(buf, arg)
 #define platform_jmp_buf jmp_buf

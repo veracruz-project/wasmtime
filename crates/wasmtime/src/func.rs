@@ -17,6 +17,15 @@ use wasmtime_runtime::{
     VMTrampoline,
 };
 
+cfg_if::cfg_if! {
+    if #[cfg(target_os = "icecap")] {
+        use wasmtime_runtime::backtrace::Backtrace;
+    } else {
+        use backtrace::Backtrace;
+    }
+}
+
+
 /// Represents a host function.
 ///
 /// This differs from `Func` in that it is not associated with a `Store`.
@@ -1222,7 +1231,7 @@ fn enter_wasm_init<'a>(store: &'a Store) -> Result<impl Drop + 'a, Trap> {
                 Some(store),
                 None,
                 wasmtime_environ::ir::TrapCode::Interrupt,
-                backtrace::Backtrace::new_unresolved(),
+                Backtrace::new_unresolved(),
             ));
         }
         n => debug_assert_eq!(usize::max_value(), n),

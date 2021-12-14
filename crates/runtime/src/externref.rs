@@ -844,6 +844,7 @@ pub unsafe fn gc(
     // walking the stack.
     let stack_canary = match externref_activations_table.stack_canary.get() {
         None => {
+            #[cfg(not(target_os = "icecap"))]
             if cfg!(debug_assertions) {
                 // Assert that there aren't any Wasm frames on the stack.
                 backtrace::trace(|frame| {
@@ -870,6 +871,7 @@ pub unsafe fn gc(
     //   newly-discovered precise set.
 
     // The SP of the previous (younger) frame we processed.
+    #[cfg(not(target_os = "icecap"))]
     let mut last_sp = None;
 
     // Whether we have found our stack canary or not yet.
@@ -887,6 +889,7 @@ pub unsafe fn gc(
         });
     }
 
+    #[cfg(not(target_os = "icecap"))]
     backtrace::trace(|frame| {
         let pc = frame.ip() as usize;
         let sp = frame.sp() as usize;
