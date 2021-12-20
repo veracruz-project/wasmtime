@@ -22,8 +22,6 @@
         clippy::use_self
     )
 )]
-#![feature(weak_into_raw)]
-#![feature(array_value_iter)]
 
 const SUPPORTED_WASM_FEATURES: &[(&str, &str)] = &[
     ("all", "enables all supported WebAssembly features"),
